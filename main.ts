@@ -419,6 +419,8 @@ export default class FlashcardMakerPlugin extends Plugin {
             // Pass debug flag to Python
             if (this.settings.debugMode) {
                 console.log('Debug mode enabled');
+                // Only show one initial debug notification
+                new Notice('Debug mode: Processing flashcards...');
             }            
             // Use configured Python packages or ensure needed ones
             await this.ensurePythonPackages(this.pythonPath);
@@ -440,7 +442,7 @@ export default class FlashcardMakerPlugin extends Plugin {
             const pyScriptPath = join(scriptsPath, 'create_flashcards.py');
             const deckPath = join(vaultPath, this.settings.deckFolder);
 
-            // Verify files and directories
+            // Verify files and directories - only log to console, not as notifications
             if (this.settings.debugMode) {
                 console.log('Verifying paths...');
                 console.log('Temp directory exists:', fs.existsSync(tempDir));
@@ -456,18 +458,23 @@ export default class FlashcardMakerPlugin extends Plugin {
             // Write content to temp file
             try {
                 await fs.promises.writeFile(tempFilePath, content, 'utf-8');
-                if (this.settings.debugMode) console.log('Successfully wrote temp file at:', tempFilePath);
+                if (this.settings.debugMode) {
+                    console.log('Successfully wrote temp file at:', tempFilePath);
+                }
             } catch (err) {
                 console.error('Failed to write temp file:', err);
                 throw err;
             }
             
-            // Verify temp file was written
+            // Verify temp file was written - log to console only
             if (this.settings.debugMode) console.log('Temp file exists:', fs.existsSync(tempFilePath));
             
             // Create decks folder if it doesn't exist
             if (!fs.existsSync(deckPath)) {
                 await fs.promises.mkdir(deckPath, { recursive: true });
+                if (this.settings.debugMode) {
+                    console.log('Created deck path directory at:', deckPath);
+                }
             }
 
             // Execute Python script with appropriate flags including debug mode if enabled
@@ -485,6 +492,8 @@ export default class FlashcardMakerPlugin extends Plugin {
                 // Add debug flag if enabled
                 if (this.settings.debugMode) {
                     args.push("--debug");
+                    // Only log to console, not as notification
+                    console.log('Debug mode: Executing Python script');
                 }
                 
                 if (this.settings.debugMode) {
@@ -504,17 +513,40 @@ export default class FlashcardMakerPlugin extends Plugin {
 
                 let stdout = '';
                 let stderr = '';
+                
+                // Track if we've already shown a validation summary notification
+                let hasShownValidationNotice = false;
 
                 pythonProcess.stdout.on('data', (data) => {
                     const output = data.toString();
                     stdout += output;
-                    if (this.settings.debugMode) console.log('Python stdout:', output);
+                    if (this.settings.debugMode) {
+                        // Always log to console
+                        console.log('Python stdout:', output);
+                        
+                        // Show at most one validation summary message
+                        if (!hasShownValidationNotice && output.includes('cards passed validation')) {
+                            // Extract just the numeric summary and show that
+                            const validationMatch = output.match(/(\d+) cards passed validation, (\d+) cards rejected, (\d+) cards auto-corrected/);
+                            if (validationMatch) {
+                                const [_, valid, rejected, autocorrected] = validationMatch;
+                                new Notice(`Cards: ${valid} valid, ${rejected} rejected, ${autocorrected} auto-corrected`);
+                                hasShownValidationNotice = true;
+                            }
+                        }
+                    }
                 });
 
                 pythonProcess.stderr.on('data', (data) => {
                     const output = data.toString();
                     stderr += output;
                     console.error('Python stderr:', output);
+                    
+                    // Only show critical errors as notifications, not every message
+                    if (this.settings.debugMode && output.trim() && 
+                        (output.includes('Error:') || output.includes('Exception:') || output.includes('Critical:'))) {
+                        new Notice(`Error: ${output.trim().split('\n')[0].substring(0, 100)}`);
+                    }
                 });
 
                 pythonProcess.on('error', (error) => {
@@ -527,19 +559,22 @@ export default class FlashcardMakerPlugin extends Plugin {
                     if (!this.settings.keepTempFiles) {
                         try {
                             await fs.promises.unlink(tempFilePath);
-                            if (this.settings.debugMode) console.log('Temp file deleted');
+                            if (this.settings.debugMode) {
+                                console.log('Temp file deleted');
+                            }
                         } catch (err) {
                             console.error('Failed to delete temp file:', err);
                         }
                     }
                     
                     if (code === 0) {
+                        // Successfully created the cards
                         new Notice('Flashcards created successfully!');
                         resolve(stdout);
                     } else {
                         const error = new Error(`Python process failed with code ${code}\n${stderr}`);
                         console.error(error);
-                        new Notice(`Error creating flashcards: ${stderr}`);
+                        new Notice(`Error creating flashcards: ${stderr.split('\n')[0]}`);
                         reject(error);
                     }
                 });
@@ -551,7 +586,9 @@ export default class FlashcardMakerPlugin extends Plugin {
         } finally {
             // Don't delete the temp directory immediately
             // Let the system clean it up later or on next run
-            if (this.settings.debugMode) console.log('Finished processing');
+            if (this.settings.debugMode) {
+                console.log('Finished processing');
+            }
         }
     }
 

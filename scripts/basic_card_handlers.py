@@ -227,21 +227,53 @@ def create_image_occlusion_note(card, model, tags):
     front = card.get('front', '')
     back = card.get('back', '')
     category = card.get('tags', '')
-    masked_areas = card.get('masked_areas', [])
     
+    # Get masked areas - this could be a string or already parsed as a list
+    masked_areas_raw = card.get('masked_areas', '')
+    
+    # Convert to HTML with proper styling
     front_html = simple_markdown_to_html(front)
+    back_html = simple_markdown_to_html(back)
+    
+    # Process masked areas - can be a string or list
+    masked_areas = []
+    if isinstance(masked_areas_raw, list):
+        masked_areas = masked_areas_raw
+    elif isinstance(masked_areas_raw, str):
+        # Try to parse the string as a list-like format
+        try:
+            # Clean up the string and handle multiple area definitions
+            areas_text = masked_areas_raw.strip().replace('\n', ' ')
+            
+            # Extract individual area definitions - each should be in [x,y,w,h] format
+            import re
+            area_matches = re.findall(r'\[([\d\s,.]+?)\]', areas_text)
+            
+            for area_match in area_matches:
+                # Split by commas or spaces and convert to integers
+                coords = re.split(r'[\s,]+', area_match.strip())
+                if len(coords) >= 4:
+                    # Get at least 4 values as integers
+                    try:
+                        x, y, w, h = [int(coord.strip()) for coord in coords[:4]]
+                        masked_areas.append([x, y, w, h])
+                    except (ValueError, TypeError):
+                        # If conversion fails, just skip this area
+                        continue
+        except Exception as e:
+            print(f"Error parsing masked areas: {e}")
+    
+    # For debugging
+    print(f"Processed {len(masked_areas)} masked areas")
     
     # Add masking divs for occluded areas
-    if (masked_areas):
+    if masked_areas:
         front_html += "<div class='image-occlusion-container' style='position: relative;'>"
         for area in masked_areas:
-            coords = area.split(',')
-            if len(coords) >= 4:
-                left, top, width, height = coords[:4]
+            if len(area) >= 4:
+                left, top, width, height = area[:4]
                 front_html += f"<div class='occlusion-rect' style='position: absolute; left: {left}px; top: {top}px; width: {width}px; height: {height}px; background-color: black;'></div>"
         front_html += "</div>"
-    
-    back_html = simple_markdown_to_html(back)
     
     return genanki.Note(
         model=model,
