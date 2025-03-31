@@ -360,8 +360,9 @@ def create_anki_deck(
                         logger.error(f"Error using basic fallback handler for card #{i+1}: {str(e)}")
 
             except Exception as e:
-                import traceback
+                handler_failures += 1
                 logger.error(f"Error processing card #{i+1}: {str(e)}")
+                import traceback
                 logger.debug(f"Error details for card #{i+1}: {traceback.format_exc()}")
                 continue
         
@@ -391,10 +392,21 @@ def create_anki_deck(
 
 def parse_tags(tag_string):
     """Convert a comma-separated tag string into a list of clean tags."""
+    from util.exception_handler import sanitize_tags
+    
+    # First handle the case of no tags
     if not tag_string:
         return []
+    
+    # If already a list, sanitize directly
+    if isinstance(tag_string, list):
+        return sanitize_tags(tag_string)
+    
     # Split by commas and clean each tag
-    return [tag.strip() for tag in tag_string.split(',') if tag.strip()]
+    raw_tags = [tag.strip() for tag in str(tag_string).split(',') if tag.strip()]
+    
+    # Use our sanitization utility for consistent handling
+    return sanitize_tags(raw_tags)
 
 
 def process_audio_file(audio_ref, audio_dir, deck):

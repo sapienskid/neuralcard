@@ -2,61 +2,132 @@ import genanki
 import html
 from util.direct_parser import simple_markdown_to_html
 import re
+from util.exception_handler import (
+    sanitize_tags, sanitize_options, sanitize_coordinates,
+    safe_get_card_field, normalize_boolean_field,
+    handle_exception, clean_field_content
+)
+from util.logger import get_logger
+
+# Get logger
+logger = get_logger()
+
+@handle_exception
 def create_basic_note(card, model, tags):
-    """Create a basic front/back note.
+    """Create a basic front/back note with robust error handling.
     
     This handler also handles math content, as Anki natively supports LaTeX/MathJax.
     """
-    front = card.get('front', '')
-    back = card.get('back', '')
-    category = card.get('tags', '')
+    # Safely get card fields with proper defaults
+    front = safe_get_card_field(card, 'front', '')
+    back = safe_get_card_field(card, 'back', '')
+    category = safe_get_card_field(card, 'tags', '')
     
-    front_html = simple_markdown_to_html(front)
-    back_html = simple_markdown_to_html(back)
+    # Clean and convert content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
+    back_html = clean_field_content(simple_markdown_to_html(back), is_html=True)
     
-    return genanki.Note(
-        model=model,
-        fields=[category, front_html, back_html, ""],
-        tags=tags
-    )
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    try:
+        return genanki.Note(
+            model=model,
+            fields=[category, front_html, back_html, ""],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating basic note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            return genanki.Note(
+                model=model,
+                fields=["", front, back, ""],
+                tags=[]
+            )
+        except Exception:
+            logger.error("Failed to create basic note even with fallback approach")
+            return None
 
+@handle_exception
 def create_cloze_note(card, model, tags):
     """Create a cloze deletion note with consistent styling."""
-    front = card.get('front', '')
-    category = card.get('tags', '')
+    front = safe_get_card_field(card, 'front', '')
+    category = safe_get_card_field(card, 'tags', '')
     
     # Process cloze content
     if '{{c' not in front:
         front = convert_cloze_format(front)
     
-    # Convert to HTML with consistent styling
-    front_html = f"""
-    <div class="cloze-section">
-        <div class="question-content">
-            {simple_markdown_to_html(front)}
-        </div>
-        <div class="tags-container">
-            {' '.join(f'<span class="tag">{tag}</span>' for tag in tags)}
-        </div>
-    </div>
-    """
+    # Clean and sanitize content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
     
-    return genanki.Note(
-        model=model,
-        fields=[front_html, "", category],
-        tags=tags
-    )
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    # Convert to HTML with consistent styling
+    try:
+        # Format with tags display if tags exist
+        tags_display = ""
+        if safe_tags:
+            tags_display = '<div class="tags-container">' + ' '.join(f'<span class="tag">{tag}</span>' for tag in safe_tags) + '</div>'
+        
+        formatted_html = f"""
+        <div class="cloze-section">
+            <div class="question-content">
+                {front_html}
+            </div>
+            {tags_display}
+        </div>
+        """
+        
+        return genanki.Note(
+            model=model,
+            fields=[formatted_html, "", category],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating cloze note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            return genanki.Note(
+                model=model,
+                fields=[front, "", ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create cloze note even with fallback approach")
+            return None
 
+@handle_exception
 def create_multiple_choice_note(card, model, tags):
     """Create a multiple choice question note with improved feedback."""
-    question = card.get('front', '')
-    options = card.get('options', [])
-    correct_answer = card.get('correct_answer', '')
-    category = card.get('tags', '')
+    # Safely get fields with proper defaults
+    question = safe_get_card_field(card, 'front', 'Question')
+    options_raw = card.get('options', [])
+    correct_answer = safe_get_card_field(card, 'correct_answer', '')
+    category = safe_get_card_field(card, 'tags', '')
     
-    # Convert question to HTML
-    question_html = simple_markdown_to_html(question)
+    # Sanitize options
+    options = sanitize_options(options_raw)
     
+    # Ensure we have at least one option
+    if not options:
+        options = ["Option A", "Option B"]
+        logger.warning("No options provided for multiple choice card, using defaults")
+    
+    # If no correct answer is specified, use the first option
+    if not correct_answer and options:
+        correct_answer = options[0]
+        logger.warning("No correct answer specified, using first option as correct")
+    
+    # Clean and convert content
+    question_html = clean_field_content(simple_markdown_to_html(question), is_html=True)
+    
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    # JavaScript for interactive behavior
     script = """
     <script>
     function checkMCQAnswer(element, isCorrect) {
@@ -71,7 +142,7 @@ def create_multiple_choice_note(card, model, tags):
         
         // Disable all options
         var options = document.querySelectorAll('.mcq-option');
-        for (var i = 0;  options.length >i; i++) {
+        for (var i = 0; i < options.length; i++) {
             options[i].onclick = null;
             if (options[i] !== element) {
                 options[i].style.opacity = '0.6';
@@ -81,221 +152,314 @@ def create_multiple_choice_note(card, model, tags):
     </script>
     """
     
-    # Create HTML for options (front)
-    options_html = """
-    <div class='mcq-section'>
-        <div class='mcq-question'>%s</div>
-        <div class='multiple-choice' id='mcq-options'>""" % question_html
-    
-    # Include direct onclick handlers (most reliable in Anki)
-    for i, option in enumerate(options):
-        option_html = simple_markdown_to_html(option)
-        is_correct = option.strip() == correct_answer.strip()
-        correct_str = "true" if is_correct else "false"
+    try:
+        # Create HTML for options (front)
+        options_html = f"""
+        <div class='mcq-section'>
+            <div class='mcq-question'>{question_html}</div>
+            <div class='multiple-choice' id='mcq-options'>"""
         
-        options_html += f"""
-            <div class="mcq-option" onclick="checkMCQAnswer(this, {correct_str})">
+        # Include direct onclick handlers (most reliable in Anki)
+        for i, option in enumerate(options):
+            # Clean the option and convert to HTML
+            option_html = clean_field_content(simple_markdown_to_html(option), is_html=True)
+            
+            # Check if this is the correct answer, using forgiving comparison
+            is_correct = option.strip().lower() == correct_answer.strip().lower()
+            correct_str = "true" if is_correct else "false"
+            
+            options_html += f"""
+                <div class="mcq-option" onclick="checkMCQAnswer(this, {correct_str})">
+                    <div class="mcq-option-content">
+                        <span class="mcq-option-text">{option_html}</span>
+                        <span class="mcq-result-icon"></span>
+                    </div>
+                </div>
+            """
+        
+        options_html += "</div></div>"
+        
+        # Combine script with options (script needs to be before options for Anki)
+        front_content = script + options_html
+
+        # Create HTML for answer reveal (back)
+        answer_html = f"<div class='mcq-section'><div class='mcq-question'>{question_html}</div>"
+        answer_html += "<div class='multiple-choice answer-reveal'>"
+        
+        for option in options:
+            option_html = clean_field_content(simple_markdown_to_html(option), is_html=True)
+            is_correct = option.strip().lower() == correct_answer.strip().lower()
+            option_style = "border-color: " + ("#2ecc71" if is_correct else "#e74c3c") + ";"
+            icon = "✓" if is_correct else "✗"
+            icon_color = "#2ecc71" if is_correct else "#e74c3c"
+            background_color = "rgba(46, 204, 113, 0.1)" if is_correct else "rgba(231, 76, 60, 0.05)"
+            
+            # Also use classes instead of data attributes here for consistency
+            option_class = f"mcq-option {'opt-correct' if is_correct else 'opt-incorrect'}"
+            
+            answer_html += f"""
+            <div class="{option_class}" style="{option_style} background: {background_color};">
                 <div class="mcq-option-content">
                     <span class="mcq-option-text">{option_html}</span>
-                    <span class="mcq-result-icon"></span>
+                    <span class="mcq-result-icon" style="color: {icon_color};">{icon}</span>
                 </div>
-            </div>
-        """
-    
-    options_html += "</div></div>"
-    
-    # Combine script with options (script needs to be before options for Anki)
-    front_content = script + options_html
-
-    # Create HTML for answer reveal (back)
-    answer_html = f"<div class='mcq-section'><div class='mcq-question'>{question_html}</div>"
-    answer_html += "<div class='multiple-choice answer-reveal'>"
-    
-    for option in options:
-        option_html = simple_markdown_to_html(option)
-        is_correct = option.strip() == correct_answer.strip()
-        option_style = "border-color: " + ("#2ecc71" if is_correct else "#e74c3c") + ";"
-        icon = "✓" if is_correct else "✗"
-        icon_color = "#2ecc71" if is_correct else "#e74c3c"
-        background_color = "rgba(46, 204, 113, 0.1)" if is_correct else "rgba(231, 76, 60, 0.05)"
+            </div>"""
         
-        # Also use classes instead of data attributes here for consistency
-        option_class = f"mcq-option {'opt-correct' if is_correct else 'opt-incorrect'}"
+        answer_html += "</div></div>"
         
-        answer_html += f"""
-        <div class="{option_class}" style="{option_style} background: {background_color};">
-            <div class="mcq-option-content">
-                <span class="mcq-option-text">{option_html}</span>
-                <span class="mcq-result-icon" style="color: {icon_color};">{icon}</span>
-            </div>
-        </div>"""
-    
-    answer_html += "</div></div>"
-    
-    return genanki.Note(
-        model=model,
-        fields=[category, question_html, front_content, answer_html, ""],
-        tags=tags
-    )
+        return genanki.Note(
+            model=model,
+            fields=[category, question_html, front_content, answer_html, ""],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating multiple choice note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            simple_front = f"<p>{question}</p><p>Options: {', '.join(options)}</p>"
+            simple_back = f"<p>Correct answer: {correct_answer}</p>"
+            return genanki.Note(
+                model=model,
+                fields=[category, simple_front, "", simple_back, ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create multiple choice note even with fallback approach")
+            return None
 
+@handle_exception
 def create_true_false_note(card, model, tags):
     """Create a true/false question note with properly escaped HTML."""
-    front = card.get('front', '')
-    back = card.get('back', '')
-    correct_answer = card.get('correct_answer', 'True')
-    category = card.get('tags', '')
+    # Safely get fields with proper defaults
+    front = safe_get_card_field(card, 'front', '')
+    back = safe_get_card_field(card, 'back', '')
+    correct_answer_raw = card.get('correct_answer', 'True')
+    category = safe_get_card_field(card, 'tags', '')
     
-    # Convert markdown to HTML first
-    front_html = simple_markdown_to_html(front)
-    back_html = simple_markdown_to_html(back)
+    # Normalize correct_answer to handle various input formats
+    if isinstance(correct_answer_raw, bool):
+        correct_answer = "True" if correct_answer_raw else "False"
+    else:
+        # Try to interpret strings like "t", "yes", "1" as True
+        correct_answer_str = str(correct_answer_raw).strip().lower()
+        if correct_answer_str in ['true', 't', 'yes', 'y', '1']:
+            correct_answer = "True"
+        else:
+            correct_answer = "False"
     
-    # Instead of using HTML buttons directly, use div elements that will be styled as buttons
-    # This avoids the HTML attribute escaping issues
+    # Clean and convert content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
+    back_html = clean_field_content(simple_markdown_to_html(back), is_html=True)
+    
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    # Calculate if True/False are correct
     is_true_correct = str(correct_answer == "True").lower()
     is_false_correct = str(correct_answer == "False").lower()
     
-    front_html += f"""
-    <div class="true-false-container">
-      <div class="tf-button" id="true-btn" data-correct="{is_true_correct}">True</div>
-      <div class="tf-button" id="false-btn" data-correct="{is_false_correct}">False</div>
-    </div>
-    """
-    
-    back_html += f"<p><strong>Correct answer:</strong> {html.escape(correct_answer)}</p>"
-    
-    # Add script for checking true/false answers
-    # Using a script tag that will be included in the card template
-    script = """
-    <script>
-    document.addEventListener("DOMContentLoaded", function() {
-        // Set up true/false buttons
-        var trueBtn = document.getElementById('true-btn');
-        var falseBtn = document.getElementById('false-btn');
+    try:
+        front_html += f"""
+        <div class="true-false-container">
+          <div class="tf-button" id="true-btn" data-correct="{is_true_correct}">True</div>
+          <div class="tf-button" id="false-btn" data-correct="{is_false_correct}">False</div>
+        </div>
+        """
         
-        if (trueBtn && falseBtn) {
-            trueBtn.addEventListener('click', function() {
-                checkTrueFalseAnswer('true');
-            });
+        back_html += f"<p><strong>Correct answer:</strong> {html.escape(correct_answer)}</p>"
+        
+        # Add script for checking true/false answers
+        script = """
+        <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            // Set up true/false buttons
+            var trueBtn = document.getElementById('true-btn');
+            var falseBtn = document.getElementById('false-btn');
             
-            falseBtn.addEventListener('click', function() {
-                checkTrueFalseAnswer('false');
-            });
-        }
-    });
-    
-    function checkTrueFalseAnswer(selection) {
-        var buttons = document.querySelectorAll('.tf-button');
-        buttons.forEach(function(btn) {
-            btn.style.pointerEvents = 'none'; // Disable further clicks
-            
-            if (btn.getAttribute('data-correct') === 'true') {
-                btn.style.backgroundColor = '#4CAF50';
-                btn.style.color = 'white';
-            } else if (btn.id === selection + '-btn' && btn.getAttribute('data-correct') === 'false') {
-                btn.style.backgroundColor = '#f44336';
-                btn.style.color = 'white';
+            if (trueBtn && falseBtn) {
+                trueBtn.addEventListener('click', function() {
+                    checkTrueFalseAnswer('true');
+                });
+                
+                falseBtn.addEventListener('click', function() {
+                    checkTrueFalseAnswer('false');
+                });
             }
         });
-    }
-    </script>
-    """
-    
-    return genanki.Note(
-        model=model,
-        fields=[category, front_html, back_html, script],
-        tags=tags
-    )
-
-def create_reversed_note(card, model, tags):
-    """Create a reversed note where front/back are swapped."""
-    front = card.get('front', '')
-    back = card.get('back', '')
-    category = card.get('tags', '')
-    
-    front_html = simple_markdown_to_html(front)
-    back_html = simple_markdown_to_html(back)
-    
-    # Create the reversed note (back content appears on front)
-    return genanki.Note(
-        model=model,
-        fields=[category, back_html, front_html, ""],
-        tags=tags
-    )
-
-def create_image_occlusion_note(card, model, tags):
-    """Create an image occlusion note."""
-    front = card.get('front', '')
-    back = card.get('back', '')
-    category = card.get('tags', '')
-    
-    # Get masked areas - this could be a string or already parsed as a list
-    masked_areas_raw = card.get('masked_areas', '')
-    
-    # Convert to HTML with proper styling
-    front_html = simple_markdown_to_html(front)
-    back_html = simple_markdown_to_html(back)
-    
-    # Process masked areas - can be a string or list
-    masked_areas = []
-    if isinstance(masked_areas_raw, list):
-        masked_areas = masked_areas_raw
-    elif isinstance(masked_areas_raw, str):
-        # Try to parse the string as a list-like format
+        
+        function checkTrueFalseAnswer(selection) {
+            var buttons = document.querySelectorAll('.tf-button');
+            buttons.forEach(function(btn) {
+                btn.style.pointerEvents = 'none'; // Disable further clicks
+                
+                if (btn.getAttribute('data-correct') === 'true') {
+                    btn.style.backgroundColor = '#4CAF50';
+                    btn.style.color = 'white';
+                } else if (btn.id === selection + '-btn' && btn.getAttribute('data-correct') === 'false') {
+                    btn.style.backgroundColor = '#f44336';
+                    btn.style.color = 'white';
+                }
+            });
+        }
+        </script>
+        """
+        
+        return genanki.Note(
+            model=model,
+            fields=[category, front_html, back_html, script],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating true/false note: {str(e)}")
+        # Try a fallback approach with minimal content 
         try:
-            # Clean up the string and handle multiple area definitions
-            areas_text = masked_areas_raw.strip().replace('\n', ' ')
-            
-            # Extract individual area definitions - each should be in [x,y,w,h] format
-            import re
-            area_matches = re.findall(r'\[([\d\s,.]+?)\]', areas_text)
-            
-            for area_match in area_matches:
-                # Split by commas or spaces and convert to integers
-                coords = re.split(r'[\s,]+', area_match.strip())
-                if len(coords) >= 4:
-                    # Get at least 4 values as integers
-                    try:
-                        x, y, w, h = [int(coord.strip()) for coord in coords[:4]]
-                        masked_areas.append([x, y, w, h])
-                    except (ValueError, TypeError):
-                        # If conversion fails, just skip this area
-                        continue
-        except Exception as e:
-            print(f"Error parsing masked areas: {e}")
-    
-    # For debugging
-    print(f"Processed {len(masked_areas)} masked areas")
-    
-    # Add masking divs for occluded areas
-    if masked_areas:
-        front_html += "<div class='image-occlusion-container' style='position: relative;'>"
-        for area in masked_areas:
-            if len(area) >= 4:
-                left, top, width, height = area[:4]
-                front_html += f"<div class='occlusion-rect' style='position: absolute; left: {left}px; top: {top}px; width: {width}px; height: {height}px; background-color: black;'></div>"
-        front_html += "</div>"
-    
-    return genanki.Note(
-        model=model,
-        fields=[category, front_html, back_html, ""],
-        tags=tags
-    )
+            simple_front = f"<p>{front}</p><p>(True/False Question)</p>"
+            simple_back = f"<p>Correct answer: {correct_answer}</p>"
+            return genanki.Note(
+                model=model,
+                fields=[category, simple_front, simple_back, ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create true/false note even with fallback approach")
+            return None
 
+@handle_exception
+def create_reversed_note(card, model, tags):
+    """Create a reversed note where front/back are swapped with robust error handling."""
+    # Safely get fields with proper defaults
+    front = safe_get_card_field(card, 'front', '')
+    back = safe_get_card_field(card, 'back', '')
+    category = safe_get_card_field(card, 'tags', '')
+    
+    # Clean and convert content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
+    back_html = clean_field_content(simple_markdown_to_html(back), is_html=True)
+    
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    try:
+        # Create the reversed note (back content appears on front)
+        return genanki.Note(
+            model=model,
+            fields=[category, back_html, front_html, ""],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating reversed note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            return genanki.Note(
+                model=model,
+                fields=["", back, front, ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create reversed note even with fallback approach")
+            return None
+
+@handle_exception
+def create_image_occlusion_note(card, model, tags):
+    """Create an image occlusion note with robust error handling."""
+    # Safely get fields with proper defaults
+    front = safe_get_card_field(card, 'front', '')
+    back = safe_get_card_field(card, 'back', '')
+    category = safe_get_card_field(card, 'tags', '')
+    
+    # Get and sanitize masked areas
+    masked_areas_raw = card.get('masked_areas', '')
+    masked_areas = sanitize_coordinates(masked_areas_raw)
+    
+    # Clean and convert content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
+    back_html = clean_field_content(simple_markdown_to_html(back), is_html=True)
+    
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    try:
+        # Add masking divs for occluded areas
+        if masked_areas:
+            front_html += "<div class='image-occlusion-container' style='position: relative;'>"
+            for area in masked_areas:
+                if len(area) >= 4:
+                    left, top, width, height = area[:4]
+                    front_html += f"<div class='occlusion-rect' style='position: absolute; left: {left}px; top: {top}px; width: {width}px; height: {height}px; background-color: black;'></div>"
+            front_html += "</div>"
+        
+        return genanki.Note(
+            model=model,
+            fields=[category, front_html, back_html, ""],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating image occlusion note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            # Create a simple card without occlusions as fallback
+            return genanki.Note(
+                model=model,
+                fields=["", front, back, ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create image occlusion note even with fallback approach")
+            return None
+
+@handle_exception
 def create_audio_note(card, model, tags):
-    """Create a note with audio embedded."""
-    front = card.get('front', '')
-    back = card.get('back', '')
-    category = card.get('tags', '')
+    """Create a note with audio embedded with robust error handling."""
+    # Safely get fields with proper defaults
+    front = safe_get_card_field(card, 'front', '')
+    back = safe_get_card_field(card, 'back', '')
+    category = safe_get_card_field(card, 'tags', '')
+    audio_file = safe_get_card_field(card, 'audio', '')
+    
+    # Clean and convert content
+    front_html = clean_field_content(simple_markdown_to_html(front), is_html=True)
+    back_html = clean_field_content(simple_markdown_to_html(back), is_html=True)
     
     # Process audio references to ensure they work in Anki
-    front_html = process_audio_references(simple_markdown_to_html(front))
-    back_html = simple_markdown_to_html(back)
+    if not audio_file and '[sound:' not in front_html and '[audio:' not in front_html:
+        # If no audio file is specified, look for references in the front content
+        audio_matches = re.findall(r'\b(audio|sound):\s*([^\s\]]+)', front)
+        if audio_matches:
+            audio_file = audio_matches[0][1]
+            logger.info(f"Extracted audio reference from content: {audio_file}")
     
-    return genanki.Note(
-        model=model,
-        fields=[category, front_html, back_html, ""],
-        tags=tags
-    )
+    # Add explicit audio reference if provided but not already in the content
+    if audio_file and '[sound:' not in front_html and '[audio:' not in front_html:
+        front_html += f"<div class='audio-reference'>[sound:{audio_file}]</div>"
+    
+    # Ensure all audio references use the correct format
+    front_html = process_audio_references(front_html)
+    
+    # Sanitize tags
+    safe_tags = sanitize_tags(tags)
+    
+    try:
+        return genanki.Note(
+            model=model,
+            fields=[category, front_html, back_html, ""],
+            tags=safe_tags
+        )
+    except Exception as e:
+        logger.error(f"Error creating audio note: {str(e)}")
+        # Try a fallback approach with minimal content
+        try:
+            simple_front = f"<p>{front}</p>"
+            if audio_file:
+                simple_front += f"<p>[sound:{audio_file}]</p>"
+            
+            return genanki.Note(
+                model=model,
+                fields=["", simple_front, back, ""],
+                tags=[]
+            )
+        except:
+            logger.error("Failed to create audio note even with fallback approach")
+            return None
 
 
 # Helper functions
