@@ -31,8 +31,24 @@ Note: If you experience issues with Python package installation:
 
 1. Install the plugin through the Obsidian Community Plugins browser
 2. Configure your preferred settings
-3. Open any note and click the NeuralCard icon in the ribbon
-4. Your flashcards will be created automatically!
+3. Open any note and click the NeuralCard icon in the ribbon to process existing flashcards
+4. Or use hotkeys to quickly insert flashcard templates into your notes
+
+### Using Hotkeys for Flashcard Templates
+
+1. Go to **Settings → Hotkeys** in Obsidian
+2. Search for "flashcard" or "insert"
+3. Assign your preferred key combinations for different card types:
+   - Basic Card: `flashcard-maker:insert-basic-card`
+   - Cloze Card: `flashcard-maker:insert-cloze-card`
+   - Fill-in-the-Blank Card: `flashcard-maker:insert-fill-in-blank-card`
+   - Multiple Choice Card: `flashcard-maker:insert-multiple-choice-card`
+   - True/False Card: `flashcard-maker:insert-true-false-card`
+   - Math Card: `flashcard-maker:insert-math-card`
+4. Press your assigned hotkey while editing a note to insert a template
+5. Complete the template with your question and answer
+
+When you're ready to create all the flashcards in your note, click the NeuralCard icon in the ribbon.
 
 ## Settings
 
@@ -96,7 +112,7 @@ If you encounter issues:
 4. Verify Python installation (3.x required)
 5. Note: If you're using Windows or macOS, please report any issues on GitHub as I'm actively working on cross-platform support
 
-For detailed flashcard formatting instructions, see [Flashcard Format Guide](docs/FLASHCARD_GUIDE.md) or check the plugin settings.
+For detailed flashcard formatting instructions, see [Flashcard Format Guide](docs/flashcard_guide.md) or check the plugin settings.
 
 ## Contributing
 

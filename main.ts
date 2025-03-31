@@ -1,4 +1,4 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, Modal, MarkdownRenderer } from 'obsidian';
+import { App, Notice, Plugin, PluginSettingTab, Setting, Modal, MarkdownRenderer, Editor } from 'obsidian';
 import { spawn, spawnSync } from 'child_process';
 import { join, dirname } from 'path';
 import * as fs from 'fs';
@@ -73,7 +73,119 @@ const DEFAULT_SETTINGS: FlashcardSettings = {
     addTags: true
 }
 
+// Define a type for the card template keys
+type CardTemplateType = 'basic' | 'cloze' | 'fillInBlank' | 'multipleChoice' | 'trueFalse' | 'math' | 'reversed' | 'imageOcclusion' | 'audio';
 
+// Card templates for different flashcard types
+const CARD_TEMPLATES: Record<CardTemplateType, string> = {
+    basic: `<!-- Anki Card -->
+<!-- type: basic -->
+<!-- front -->
+Enter your question here
+
+<!-- back -->
+Enter your answer here
+<!-- tags: -->
+
+---
+`,
+    cloze: `<!-- Anki Card -->
+<!-- type: cloze -->
+<!-- front -->
+This is a {{cloze deletion}} example.
+<!-- tags: -->
+
+---
+`,
+    fillInBlank: `<!-- Anki Card -->
+<!-- type: fill-in-the-blank -->
+<!-- front -->
+The process by which plants make their own food using sunlight is called ____________.
+
+<!-- back -->
+photosynthesis
+<!-- tags: -->
+
+---
+`,
+    multipleChoice: `<!-- Anki Card -->
+<!-- type: multiple-choice -->
+<!-- front -->
+Which planet is known as the Red Planet?
+
+<!-- options -->
+Venus
+Mars <!-- correct -->
+Jupiter
+Saturn
+
+<!-- back -->
+Mars is often called the Red Planet due to the iron oxide prevalent on its surface.
+<!-- tags: -->
+
+---
+`,
+    trueFalse: `<!-- Anki Card -->
+<!-- type: true-false -->
+<!-- front -->
+The Great Wall of China is visible from space with the naked eye.
+
+<!-- back -->
+False. It's a common misconception.
+<!-- correct_answer: False -->
+<!-- tags: -->
+
+---
+`,
+    math: `<!-- Anki Card -->
+<!-- type: basic -->
+<!-- front -->
+Solve: $x^2 + 5x + 6 = 0$
+
+<!-- back -->
+$x = -2$ or $x = -3$
+<!-- tags: math -->
+
+---
+`,
+    reversed: `<!-- Anki Card -->
+<!-- type: reversed -->
+<!-- front -->
+Term or concept
+
+<!-- back -->
+Definition or explanation
+<!-- tags: -->
+
+---
+`,
+    imageOcclusion: `<!-- Anki Card -->
+<!-- type: image-occlusion -->
+<!-- front -->
+![Image description](path/to/image.png)
+
+<!-- masked-areas -->
+[x, y, width, height]
+
+<!-- back -->
+Description of the masked areas
+<!-- tags: -->
+
+---
+`,
+    audio: `<!-- Anki Card -->
+<!-- type: audio -->
+<!-- front -->
+Listen and identify:
+[audio:filename.mp3]
+
+<!-- back -->
+Answer
+<!-- tags: -->
+
+---
+`
+};
 
 export default class FlashcardMakerPlugin extends Plugin {
     settings: FlashcardSettings;
@@ -139,14 +251,81 @@ export default class FlashcardMakerPlugin extends Plugin {
             }
         });
         
+        // Add hotkey commands for different card types
+        this.addCommand({
+            id: 'insert-basic-card',
+            name: 'Insert Basic Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'basic');
+            }
+        });
         
-
+        this.addCommand({
+            id: 'insert-cloze-card',
+            name: 'Insert Cloze Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'cloze');
+            }
+        });
+        
+        this.addCommand({
+            id: 'insert-fill-in-blank-card',
+            name: 'Insert Fill-in-the-Blank Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'fillInBlank');
+            }
+        });
+        
+        this.addCommand({
+            id: 'insert-multiple-choice-card',
+            name: 'Insert Multiple Choice Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'multipleChoice');
+            }
+        });
+        
+        this.addCommand({
+            id: 'insert-true-false-card',
+            name: 'Insert True/False Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'trueFalse');
+            }
+        });
+        
+        this.addCommand({
+            id: 'insert-math-card',
+            name: 'Insert Math Card Template',
+            editorCallback: (editor: Editor) => {
+                this.insertTemplate(editor, 'math');
+            }
+        });
+        
         // Initialize Python path
         try {
             this.pythonPath = await this.findSystemPython();
         } catch (error) {
             console.error('Failed to find Python:', error);
             new Notice('Python not found. Please install Python 3.x');
+        }
+    }
+    
+    // Insert a card template at the current cursor position
+    insertTemplate(editor: Editor, templateType: CardTemplateType): void {
+        const template = CARD_TEMPLATES[templateType];
+        if (template) {
+            // Insert the template at the current cursor position
+            const currentPosition = editor.getCursor();
+            
+            // Add a newline before if we're not at the start of the line
+            const lineContent = editor.getLine(currentPosition.line);
+            const prefix = currentPosition.ch > 0 && lineContent.length > 0 ? '\n' : '';
+            
+            editor.replaceRange(prefix + template + '\n', currentPosition);
+            
+            // Show a brief notice
+            new Notice(`${templateType.charAt(0).toUpperCase() + templateType.slice(1)} card template inserted`);
+        } else {
+            new Notice(`Template for "${templateType}" not found.`);
         }
     }
 
@@ -557,21 +736,13 @@ class FlashcardSettingTab extends PluginSettingTab {
         const {containerEl} = this;
         containerEl.empty();
 
-        // Create tabs for better organization
-        const tabsEl = containerEl.createEl('div', {cls: 'settings-tabs'});
-        const tabContentsEl = tabsEl.createEl('div', {cls: 'settings-tab-contents'});
-        
-
-        // Create tab contents
-        const generalTabContent = tabContentsEl.createEl('div', {cls: 'settings-tab-content active'});
-        const advancedTabContent = tabContentsEl.createEl('div', {cls: 'settings-tab-content'});
-        
-
-
         // General Settings Section
-        generalTabContent.createEl('h3', {text: 'General Settings'});
+        containerEl.createEl('h2', {text: 'Flashcard Maker Settings'});
         
-        new Setting(generalTabContent)
+        const generalSection = containerEl.createEl('div', {cls: 'setting-section'});
+        generalSection.createEl('h3', {text: 'General Settings'});
+        
+        new Setting(generalSection)
             .setName('Deck Folder')
             .setDesc('Folder where deck files will be saved')
             .addText(text => text
@@ -582,7 +753,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(generalTabContent)
+        new Setting(generalSection)
             .setName('Default Deck Name')
             .setDesc('Default name for new decks')
             .addText(text => text
@@ -593,7 +764,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        new Setting(generalTabContent)
+        new Setting(generalSection)
             .setName('Default Tags')
             .setDesc('Default tags for new cards (comma-separated)')
             .addText(text => text
@@ -604,8 +775,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
         
-        // Add this setting before the Custom CSS setting
-        new Setting(generalTabContent)
+        new Setting(generalSection)
             .setName('Card Style')
             .setDesc('Choose the visual style for your flashcards')
             .addDropdown(dropdown => dropdown
@@ -618,11 +788,42 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-        // Advanced Settings Section
-        advancedTabContent.createEl('h3', {text: 'Advanced Settings'});
-    
+        // Hotkeys Section
+        const hotkeysSection = containerEl.createEl('div', {cls: 'setting-section'});
+        hotkeysSection.createEl('h3', {text: 'Flashcard Templates Hotkeys'});
         
-        new Setting(advancedTabContent)
+        const hotkeyInfo = hotkeysSection.createEl('div', {cls: 'flashcard-hotkey-info'});
+        hotkeyInfo.innerHTML = `
+            <p>You can assign hotkeys to quickly insert different flashcard templates into your notes.</p>
+            <ol>
+                <li>Go to <strong>Settings → Hotkeys</strong> in Obsidian</li>
+                <li>Search for "flashcard" or "insert"</li>
+                <li>Assign your preferred key combinations to each card type</li>
+            </ol>
+            <p>The following commands are available for hotkeys:</p>
+        `;
+        
+        const hotkeyTable = hotkeysSection.createEl('table', {cls: 'flashcards-hotkey-table'});
+        const tableHead = hotkeyTable.createEl('thead');
+        const headerRow = tableHead.createEl('tr');
+        headerRow.createEl('th', {text: 'Card Type'});
+        headerRow.createEl('th', {text: 'Command ID'});
+        headerRow.createEl('th', {text: 'Description'});
+        
+        const tableBody = hotkeyTable.createEl('tbody');
+        
+        this.addHotkeyRow(tableBody, 'Basic', 'flashcard-maker:insert-basic-card', 'Question and answer card');
+        this.addHotkeyRow(tableBody, 'Cloze', 'flashcard-maker:insert-cloze-card', 'Text with hidden portions to recall');
+        this.addHotkeyRow(tableBody, 'Fill-in-the-Blank', 'flashcard-maker:insert-fill-in-blank-card', 'Question with blank space to complete');
+        this.addHotkeyRow(tableBody, 'Multiple Choice', 'flashcard-maker:insert-multiple-choice-card', 'Question with multiple options');
+        this.addHotkeyRow(tableBody, 'True/False', 'flashcard-maker:insert-true-false-card', 'Statement to evaluate as true or false');
+        this.addHotkeyRow(tableBody, 'Math', 'flashcard-maker:insert-math-card', 'Card with LaTeX math equations');
+        
+        // Advanced Settings Section
+        const advancedSection = containerEl.createEl('div', {cls: 'setting-section'});
+        advancedSection.createEl('h3', {text: 'Advanced Settings'});
+        
+        new Setting(advancedSection)
             .setName('Media Folder')
             .setDesc('Folder where media files will be stored')
             .addText(text => text
@@ -633,8 +834,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
         
-        
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('AnkiConnect URL')
             .setDesc('URL for AnkiConnect')
             .addText(text => text
@@ -645,7 +845,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
         
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Sync on Create')
             .setDesc('Sync with Anki on card creation')
             .addToggle(toggle => toggle
@@ -655,7 +855,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
         
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Keep Temporary Files')
             .setDesc('Keep temporary files for debugging purposes')
             .addToggle(toggle => toggle
@@ -665,7 +865,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
                 
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Temporary File Lifespan')
             .setDesc('How long to keep temporary files before cleanup (in hours)')
             .addSlider(slider => slider
@@ -677,7 +877,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
                 
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Log Retention')
             .setDesc('How many days to keep log files')
             .addSlider(slider => slider
@@ -689,7 +889,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
                 
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Clean up on Startup')
             .setDesc('Automatically clean up old temp files and logs when starting Obsidian')
             .addToggle(toggle => toggle
@@ -699,7 +899,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
         
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Manual Cleanup')
             .setDesc('Delete all old temporary files and logs now')
             .addButton(button => button
@@ -709,7 +909,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     new Notice('Cleanup completed');
                 }));
                 
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Debug Mode')
             .setDesc('Enable verbose logging for troubleshooting')
             .addToggle(toggle => toggle
@@ -719,7 +919,7 @@ class FlashcardSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
                 
-        new Setting(advancedTabContent)
+        new Setting(advancedSection)
             .setName('Python Path')
             .setDesc('Custom path to Python executable (leave empty for auto-detection)')
             .addText(text => text
@@ -741,18 +941,50 @@ class FlashcardSettingTab extends PluginSettingTab {
                     }
                     await this.plugin.saveSettings();
                 }));
+
+        // Add custom CSS for the table
+        const customCss = document.createElement('style');
+        customCss.textContent = `
+            .setting-section {
+                margin-bottom: 30px;
+                padding-bottom: 20px;
+                border-bottom: 1px solid var(--background-modifier-border);
+            }
+            .setting-section:last-child {
+                border-bottom: none;
+            }
+            .flashcards-hotkey-table {
+                width: 100%;
+                border-collapse: collapse;
+                margin: 15px 0;
+            }
+            .flashcards-hotkey-table th,
+            .flashcards-hotkey-table td {
+                border: 1px solid var(--background-modifier-border);
+                padding: 8px 12px;
+                text-align: left;
+            }
+            .flashcards-hotkey-table th {
+                background-color: var(--background-secondary);
+                font-weight: bold;
+            }
+            .flashcards-hotkey-table tr:nth-child(even) {
+                background-color: var(--background-secondary-alt);
+            }
+            .flashcard-hotkey-info {
+                background-color: var(--background-primary-alt);
+                border-radius: 5px;
+                padding: 10px 15px;
+                margin: 10px 0;
+            }
+        `;
+        document.head.appendChild(customCss);
     }
 
-    switchTab(headerEl: HTMLElement, contentEl: HTMLElement) {
-        // Deactivate all tab headers and contents
-        const headers = this.containerEl.querySelectorAll('.settings-tab-header');
-        const contents = this.containerEl.querySelectorAll('.settings-tab-content');
-        headers.forEach(header => header.classList.remove('active'));
-        contents.forEach(content => content.classList.remove('active'));
-        
-        // Activate the selected tab
-        headerEl.classList.add('active');
-        contentEl.classList.add('active');
+    addHotkeyRow(tableBody: HTMLElement, type: string, commandId: string, description: string): void {
+        const row = tableBody.createEl('tr');
+        row.createEl('td', {text: type});
+        row.createEl('td', {text: commandId});
+        row.createEl('td', {text: description});
     }
-
 }
