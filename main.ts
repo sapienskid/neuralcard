@@ -612,10 +612,6 @@ class FlashcardSettingTab extends PluginSettingTab {
                 .addOption('default', 'Modern (Default)')
                 .addOption('retro', 'Retro')
                 .addOption('minimal', 'Minimal')
-                .addOption('bauhaus', 'Bauhaus')
-                .addOption('brutalist', 'Brutalist')
-                .addOption('contemporary', 'Contemporary')
-                .addOption('colorful', 'Colorful')
                 .setValue(this.plugin.settings.cardStyle)
                 .onChange(async (value) => {
                     this.plugin.settings.cardStyle = value;
@@ -624,17 +620,7 @@ class FlashcardSettingTab extends PluginSettingTab {
 
         // Advanced Settings Section
         advancedTabContent.createEl('h3', {text: 'Advanced Settings'});
-        
-        new Setting(advancedTabContent)
-            .setName('Custom CSS')
-            .setDesc('Add custom CSS to style your cards')
-            .addTextArea(textArea => textArea
-                .setPlaceholder('/* Your custom CSS here */')
-                .setValue(this.plugin.settings.customCSS)
-                .onChange(async (value) => {
-                    this.plugin.settings.customCSS = value;
-                    await this.plugin.saveSettings();
-                }));
+    
         
         new Setting(advancedTabContent)
             .setName('Media Folder')

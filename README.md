@@ -44,13 +44,8 @@ Note: If you experience issues with Python package installation:
   - Modern (Default)
   - Retro
   - Minimal
-  - Bauhaus
-  - Brutalist
-  - Contemporary
-  - Colorful
 
 ### Advanced Settings
-- **Custom CSS**: Add your own CSS styling
 - **Media Folder**: Location for media files
 - **AnkiConnect URL**: Configure AnkiConnect integration
 - **Keep Temporary Files**: For debugging purposes
