@@ -392,21 +392,13 @@ def create_anki_deck(
 
 def parse_tags(tag_string):
     """Convert a comma-separated tag string into a list of clean tags."""
-    from util.exception_handler import sanitize_tags
-    
-    # First handle the case of no tags
     if not tag_string:
         return []
-    
-    # If already a list, sanitize directly
-    if isinstance(tag_string, list):
-        return sanitize_tags(tag_string)
-    
     # Split by commas and clean each tag
-    raw_tags = [tag.strip() for tag in str(tag_string).split(',') if tag.strip()]
-    
-    # Use our sanitization utility for consistent handling
-    return sanitize_tags(raw_tags)
+    raw_tags = [tag.strip() for tag in tag_string.split(',') if tag.strip()]
+    # Sanitize each tag - replace spaces with underscores
+    sanitized_tags = [tag.replace(' ', '_') for tag in raw_tags]
+    return sanitized_tags
 
 
 def process_audio_file(audio_ref, audio_dir, deck):
