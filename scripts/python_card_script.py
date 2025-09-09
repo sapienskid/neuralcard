@@ -1,9 +1,7 @@
 import genanki
 import random
-import re
 import os
 from util.direct_parser import simple_markdown_to_html
-import traceback
 from util.logger import get_logger
 from util.styling import get_card_styles
 
@@ -118,275 +116,148 @@ def create_anki_deck(
     spaced_rep_settings: dict,
     template: dict
 ) -> genanki.Package:
-    """Creates an Anki deck with enhanced features including multiple choice and cloze deletions."""
+    """Creates an Anki deck with enhanced features."""
     try:
         model_id = random.randrange(1 << 30, 1 << 31)
         deck_id = random.randrange(1 << 30, 1 << 31)
 
         # Validate inputs
-        if not isinstance(cards, list):
-            print(f"Warning: Expected cards to be a list, got {type(cards)}")
-            cards = []
-        if not isinstance(tags, list):
-            print(f"Warning: Expected tags to be a list, got {type(tags)}")
-            tags = []
-        if not isinstance(styling, dict) or 'css' not in styling:
-            print(f"Warning: Invalid styling object, using default")
-            styling = {'css': ''}
+        cards = cards if isinstance(cards, list) else []
+        tags = tags if isinstance(tags, list) else []
+        styling = styling if isinstance(styling, dict) and 'css' in styling else {'css': ''}
+        template = template if isinstance(template, dict) and 'Front' in template else {
+            "Front": '<div class="front-side">{{Front}}</div>',
+            "Back": '<div class="front-side">{{FrontSide}}</div><hr id="answer"><div class="back-side">{{Back}}</div>'
+        }
 
-        if not isinstance(template, dict) or 'Front' not in template or 'Back' not in template:
-            print(f"Warning: Invalid template object, using default")
-            template = {
-                "Front": '<div class="front-side">{{Front}}</div>',
-                "Back": '<div class="front-side">{{FrontSide}}</div><hr id="answer"><div class="back-side">{{Back}}</div>'
-            }
-
-        # Get the card style and CSS from styling dict
         card_style = styling.get('card_style', 'default')
         css = styling.get('css') or get_card_styles(card_style)
-        
         logger.info(f"Creating deck with style: {card_style}")
 
-        # Create regular model for most card types
-        try:
-            regular_model = genanki.Model(
-                model_id,
-                'Enhanced Interactive Model',
-                fields=[
-                    {'name': 'Category'},
-                    {'name': 'Front'},
-                    {'name': 'Back'},
-                    {'name': 'UseScript'}  # Field for optional script
-                ],
-                templates=[{
-                    'name': 'Card 1',
-                    'qfmt': """
-                    <div class="content">
-                        <div class="category">{{Category}}</div>
-                        <div class="front">{{Front}}</div>
-                        {{#UseScript}}<script>{{UseScript}}</script>{{/UseScript}}
-                    </div>
-                    """,
-                    'afmt': """
-                    <div class="content">
-                        <div class="category">{{Category}}</div>
-                        <div class="front">{{Front}}</div>
-                        <hr>
-                        <div class="back">{{Back}}</div>
-                        {{#UseScript}}<script>{{UseScript}}</script>{{/UseScript}}
-                    </div>
-                    """
-                }],
-                css=css  # Use the style-specific CSS
-            )
-            
-            # Update other models to use the same CSS
-            global BASIC_MODEL, CLOZE_MODEL, MCQ_MODEL
-            BASIC_MODEL.css = css
-            CLOZE_MODEL.css = css
-            MCQ_MODEL.css = css
-            
-        except Exception as e:
-            print(f"Error creating regular model: {str(e)}")
-            traceback.print_exc()
-            # Create a simplified model as fallback
-            regular_model = BASIC_MODEL
+        # Create models
+        regular_model = genanki.Model(
+            model_id,
+            'Enhanced Interactive Model',
+            fields=[
+                {'name': 'Category'},
+                {'name': 'Front'},
+                {'name': 'Back'},
+                {'name': 'UseScript'}
+            ],
+            templates=[{
+                'name': 'Card 1',
+                'qfmt': """
+                <div class="content">
+                    <div class="category">{{Category}}</div>
+                    <div class="front">{{Front}}</div>
+                    {{#UseScript}}<script>{{UseScript}}</script>{{/UseScript}}
+                </div>
+                """,
+                'afmt': """
+                <div class="content">
+                    <div class="category">{{Category}}</div>
+                    <div class="front">{{Front}}</div>
+                    <hr>
+                    <div class="back">{{Back}}</div>
+                    {{#UseScript}}<script>{{UseScript}}</script>{{/UseScript}}
+                </div>
+                """
+            }],
+            css=css
+        )
 
-        # Cloze model for cloze deletion cards - Note: has only 3 fields
-        try:
-            cloze_model = genanki.Model(
-                model_id + 1,
-                'Enhanced Cloze Model',
-                fields=[
-                    {'name': 'Text'},
-                    {'name': 'Back'},
-                    {'name': 'Category'}
-                ],
-                templates=[{
-                    'name': 'Cloze',
-                    'qfmt': """
-                    <div class="content">
-                        <div class="category">{{Category}}</div>
-                        <div class="front">{{cloze:Text}}</div>
-                        <div class="back">{{Back}}</div>
-                    </div>
-                    """,
-                    'afmt': """
-                    <div class="content">
-                        <div class="category">{{Category}}</div>
-                        <div class="front">{{cloze:Text}}</div>
-                        <hr>
-                        <div class="back">{{Back}}</div>
-                    </div>
-                    """
-                }],
-                model_type=1,  # This is important to indicate it's a cloze model
-                css=css
-            )
-        except Exception as e:
-            print(f"Error creating cloze model: {str(e)}")
-            traceback.print_exc()
-            # Create a simplified model as fallback
-            cloze_model = CLOZE_MODEL
+        cloze_model = genanki.Model(
+            model_id + 1,
+            'Enhanced Cloze Model',
+            fields=[
+                {'name': 'Text'},
+                {'name': 'Back'},
+                {'name': 'Category'}
+            ],
+            templates=[{
+                'name': 'Cloze',
+                'qfmt': """
+                <div class="content">
+                    <div class="category">{{Category}}</div>
+                    <div class="front">{{cloze:Text}}</div>
+                    <div class="back">{{Back}}</div>
+                </div>
+                """,
+                'afmt': """
+                <div class="content">
+                    <div class="category">{{Category}}</div>
+                    <div class="front">{{cloze:Text}}</div>
+                    <hr>
+                    <div class="back">{{Back}}</div>
+                </div>
+                """
+            }],
+            model_type=1,
+            css=css
+        )
 
         # Create deck
         my_deck = genanki.Deck(deck_id, deck_name, description)
-
-        # Create a card signature tracker to avoid duplicates
-        card_signatures = set()
-
-        # Register all card handlers
         card_handlers = register_card_handlers()
-
-        # Counter for successful cards
         cards_added = 0
-        
-        # Detailed tracking for diagnostic purposes
         card_type_counts = {}
-        skipped_duplicates = 0
-        handler_failures = 0
-        
-        logger.info(f"Processing {len(cards)} valid cards")
+
+        logger.info(f"Processing {len(cards)} cards")
 
         # Process each card
         for i, card in enumerate(cards):
             try:
-                # Fix the tuple issue - if card is a tuple extract the dictionary
-                # This ensures backward compatibility with both tuples and dictionaries
                 if isinstance(card, tuple) and len(card) >= 2:
-                    # Extract just the dictionary from the validation tuple
                     is_valid, card_dict = card
                     if not is_valid or not card_dict:
-                        logger.warning(f"Skipping invalid card #{i+1} from tuple: {card}")
                         continue
-                    card = card_dict  # Use the dictionary for further processing
-                
-                # Ensure we have a dictionary
+                    card = card_dict
+
                 if not isinstance(card, dict):
-                    logger.warning(f"Skipping non-dictionary card #{i+1}: {type(card)}")
                     continue
-                
+
                 card_type = card.get('type', 'basic').lower()
-                
-                # Track card type counts
-                if card_type not in card_type_counts:
-                    card_type_counts[card_type] = 0
-                
-                logger.debug(f"Processing card #{i+1} of type: {card_type}")
+                card_type_counts[card_type] = card_type_counts.get(card_type, 0) + 1
 
-                # Special debugging for fill-in-blank cards
-                if card_type == 'fill-in-the-blank' or ('_____' in card.get('front', '')):
-                    logger.debug(f"Found fill-in-blank card #{i+1}: {card.get('front', '')[:30]}...")
-                    if '```' in card.get('front', ''):
-                        logger.debug("This card has code blocks with blanks")
-
-                # Create a signature for this card to avoid duplicates - using only truly identical content
-                front_content = card.get('front', '').strip()
-                back_content = card.get('back', '').strip()
-                options = str(card.get('options', ''))
-                
-                # Create a unique identifier for this specific card
-                # Only consider cards duplicates if they have exactly the same type, front, back, and options
-                import hashlib
-                content_hash = hashlib.md5(f"{card_type}:{front_content}:{back_content}:{options}".encode('utf-8')).hexdigest()
-                card_signature = f"{card_type}:{content_hash[:8]}"  # Use only first 8 chars of hash for brevity in logs
-                
-                # For debugging - to identify potential false duplicates
-                logger.debug(f"Card #{i+1} signature: {card_signature} - Content: {front_content[:30]}...")
-                
-                # TEMPORARY FIX: Always add cards from example.md (these are known to be all unique)
-                if 'example.md' in description:
-                    # Skip duplicate check for example.md cards - we know they're all unique
-                    logger.debug(f"Example card #{i+1} - skipping duplicate check")
-                    # Still track the signature for reporting purposes
-                    card_signatures.add(card_signature)
-                elif card_signature in card_signatures:
-                    logger.warning(f"Skipping duplicate card #{i+1} of type {card_type}: {front_content[:30]}...")
-                    skipped_duplicates += 1
-                    continue
-                else:
-                    # Add this card's signature to our tracker
-                    card_signatures.add(card_signature)
-
-                # Parse the card's tags into a proper list
+                # Parse tags
                 card_tags = parse_tags(card.get('tags', ''))
-                # Combine with the global tags
                 combined_tags = tags + card_tags
 
-                # Process audio references if present
+                # Process audio if present
                 if 'audio' in card:
                     audio_ref = card['audio']
                     card['front'] = card.get('front', '') + f"\n\n{process_audio_file(audio_ref, audio_dir, my_deck)}"
 
-                # Use the appropriate handler based on card type
+                # Get appropriate handler and model
                 handler = card_handlers.get(card_type)
-
-                if handler:
-                    # Determine which model to use
-                    try:
-                        if card_type in ['cloze', 'fill-in-the-blank']:
-                            note = handler(card, cloze_model, combined_tags)
-                        elif card_type in ['multiple-choice', 'mcq']:
-                            note = handler(card, MCQ_MODEL, combined_tags)
-                        else:
-                            note = handler(card, regular_model, combined_tags)
-
-                        if note:
-                            my_deck.add_note(note)
-                            card_type_counts[card_type] += 1
-                            cards_added += 1
-                            logger.debug(f"Added card #{i+1} to deck: {card_type}")
-                        else:
-                            handler_failures += 1
-                            logger.warning(f"Card handler for {card_type} returned None for card #{i+1}")
-                    except Exception as e:
-                        handler_failures += 1
-                        logger.error(f"Error using handler for card type {card_type} (card #{i+1}): {str(e)}")
-                        traceback.print_exc()
+                if card_type in ['cloze', 'fill-in-the-blank']:
+                    model = cloze_model
+                elif card_type in ['multiple-choice', 'mcq']:
+                    model = MCQ_MODEL
                 else:
-                    logger.warning(f"Unknown card type for card #{i+1}: {card_type}")
-                    # Fall back to basic card
-                    try:
-                        note = create_basic_note(card, regular_model, combined_tags)
-                        if note:
-                            my_deck.add_note(note)
-                            card_type_counts['basic'] = card_type_counts.get('basic', 0) + 1
-                            cards_added += 1
-                            logger.debug(f"Added card #{i+1} as basic fallback")
-                        else:
-                            handler_failures += 1
-                            logger.warning(f"Basic fallback handler returned None for card #{i+1}")
-                    except Exception as e:
-                        logger.error(f"Error using basic fallback handler for card #{i+1}: {str(e)}")
+                    model = regular_model
+
+                # Create and add note
+                if handler:
+                    note = handler(card, model, combined_tags)
+                    if note:
+                        my_deck.add_note(note)
+                        cards_added += 1
 
             except Exception as e:
-                handler_failures += 1
                 logger.error(f"Error processing card #{i+1}: {str(e)}")
-                import traceback
-                logger.debug(f"Error details for card #{i+1}: {traceback.format_exc()}")
                 continue
-        
-        # Log summary of cards processed
-        logger.info(f"Successfully added {cards_added} cards to deck out of {len(cards)} valid cards")
+
+        logger.info(f"Successfully added {cards_added} cards to deck")
         logger.info(f"Cards by type: {card_type_counts}")
-        if skipped_duplicates > 0:
-            logger.warning(f"Skipped {skipped_duplicates} duplicate cards")
-        if handler_failures > 0:
-            logger.warning(f"Failed to create {handler_failures} cards due to handler errors")
-        
+
         if cards_added == 0:
             logger.error("No cards were successfully added to the deck!")
-            
-        # Fix for deduplication issue - if we have a significant discrepancy, make it very clear
-        if cards_added < len(cards) * 0.7:  # If we lost more than 30% of cards
-            logger.error(f"SIGNIFICANT CARD LOSS: Started with {len(cards)} valid cards but only created {cards_added}")
-            logger.error("This may be due to overly aggressive deduplication or card handler failures.")
 
         return genanki.Package(my_deck)
+
     except Exception as e:
         logger.error(f"Error creating Anki deck: {str(e)}")
-        traceback.print_exc()
-        print(f"Error creating Anki deck: {str(e)}")
         return create_emergency_deck(deck_name, str(e))
 
 
@@ -506,6 +377,6 @@ def create_emergency_deck(deck_name: str, error_message: str) -> genanki.Package
             )
             basic_deck.add_note(basic_note)
             return genanki.Package(basic_deck)
-        except:
+        except Exception:
             # Nothing more we can do
             return None

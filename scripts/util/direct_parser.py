@@ -72,3 +72,79 @@ def simple_markdown_to_html(text: str) -> str:
     text = '\n'.join(f'<p>{p.strip()}</p>' for p in paragraphs if p.strip())
     
     return text
+
+def create_card_html_container(content: str, card_type: str = "", tags: list = None) -> str:
+    """Create a standardized HTML container for card content."""
+    tags_html = ""
+    if tags:
+        tag_spans = [f'<span class="tag">{tag}</span>' for tag in tags]
+        tags_html = f'<div class="tags-container">{" ".join(tag_spans)}</div>'
+    
+    return f"""
+    <div class="card-container {card_type}">
+        <div class="card-content">
+            {content}
+        </div>
+        {tags_html}
+    </div>
+    """
+
+def create_interactive_script(script_type: str, **kwargs) -> str:
+    """Create standardized interactive scripts for different card types."""
+    scripts = {
+        'mcq': """
+        <script>
+        function checkMCQAnswer(element, isCorrect) {
+            element.style.backgroundColor = isCorrect ? 'rgba(46, 204, 113, 0.1)' : 'rgba(231, 76, 60, 0.1)';
+            element.style.borderColor = isCorrect ? '#2ecc71' : '#e74c3c';
+            
+            var icon = element.querySelector('.mcq-result-icon');
+            icon.textContent = isCorrect ? '✓' : '✗';
+            icon.style.color = isCorrect ? '#2ecc71' : '#e74c3c';
+            
+            var options = document.querySelectorAll('.mcq-option');
+            for (var i = 0; options.length > i; i++) {
+                options[i].onclick = null;
+                if (options[i] !== element) {
+                    options[i].style.opacity = '0.6';
+                }
+            }
+        }
+        </script>
+        """,
+        'true_false': """
+        <script>
+        function checkTrueFalseAnswer(selection) {
+            var buttons = document.querySelectorAll('.tf-button');
+            buttons.forEach(function(btn) {
+                btn.style.pointerEvents = 'none';
+                
+                if (btn.getAttribute('data-correct') === 'true') {
+                    btn.style.backgroundColor = '#4CAF50';
+                    btn.style.color = 'white';
+                } else if (btn.id === selection + '-btn' && btn.getAttribute('data-correct') === 'false') {
+                    btn.style.backgroundColor = '#f44336';
+                    btn.style.color = 'white';
+                }
+            });
+        }
+        
+        document.addEventListener("DOMContentLoaded", function() {
+            var trueBtn = document.getElementById('true-btn');
+            var falseBtn = document.getElementById('false-btn');
+            
+            if (trueBtn && falseBtn) {
+                trueBtn.addEventListener('click', function() {
+                    checkTrueFalseAnswer('true');
+                });
+                
+                falseBtn.addEventListener('click', function() {
+                    checkTrueFalseAnswer('false');
+                });
+            }
+        });
+        </script>
+        """
+    }
+    
+    return scripts.get(script_type, "")

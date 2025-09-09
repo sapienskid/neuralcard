@@ -1,16 +1,26 @@
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+import yaml
 
 def parse_markdown(content: str) -> List[Dict[str, Any]]:
-    """Parse markdown content into a list of card dictionaries."""
+    """Parse markdown content into a list of card dictionaries with frontmatter support."""
     cards = []
-    card_blocks = content.split('<!-- Anki Card -->')
+    
+    # Extract frontmatter if present
+    frontmatter, content_body = extract_frontmatter(content)
+    
+    # Split content by card blocks
+    card_blocks = content_body.split('<!-- Anki Card -->')
     
     for block in card_blocks:
         if not block.strip():
             continue
             
         card = {}
+        
+        # Apply frontmatter defaults to card
+        if frontmatter:
+            card.update(frontmatter)
         
         # Extract card type
         type_match = re.search(r'<!--\s*type:\s*(\w+(?:-\w+)*)\s*-->', block)
@@ -81,7 +91,7 @@ def parse_markdown(content: str) -> List[Dict[str, Any]]:
             if back_match:
                 card['back'] = back_match.group(1).strip()
         
-        # Extract tags
+        # Extract tags (can override frontmatter tags)
         tags_match = re.search(r'<!--\s*tags:\s*(.*?)\s*-->', block)
         if tags_match:
             card['tags'] = tags_match.group(1).strip()
@@ -90,3 +100,46 @@ def parse_markdown(content: str) -> List[Dict[str, Any]]:
             cards.append(card)
     
     return cards
+
+def extract_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
+    """Extract YAML frontmatter from markdown content.
+    
+    Returns:
+        Tuple of (frontmatter_dict, content_without_frontmatter)
+    """
+    frontmatter = {}
+    
+    # Check if content starts with frontmatter delimiter
+    if not content.strip().startswith('---'):
+        return frontmatter, content
+    
+    # Find the end of frontmatter
+    lines = content.split('\n')
+    if len(lines) < 2:
+        return frontmatter, content
+    
+    # Find the closing ---
+    end_idx = -1
+    for i, line in enumerate(lines[1:], 1):
+        if line.strip() == '---':
+            end_idx = i
+            break
+    
+    if end_idx == -1:
+        return frontmatter, content
+    
+    # Extract frontmatter content
+    frontmatter_lines = lines[1:end_idx]
+    frontmatter_text = '\n'.join(frontmatter_lines)
+    
+    # Parse YAML
+    try:
+        frontmatter = yaml.safe_load(frontmatter_text) or {}
+    except yaml.YAMLError:
+        # If YAML parsing fails, return empty frontmatter
+        frontmatter = {}
+    
+    # Remove frontmatter from content
+    content_without_frontmatter = '\n'.join(lines[end_idx + 1:])
+    
+    return frontmatter, content_without_frontmatter
