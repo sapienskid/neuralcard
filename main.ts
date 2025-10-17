@@ -1,1742 +1,286 @@
-import { App, Notice, Plugin, PluginSettingTab, Setting, Modal, MarkdownRenderer, Editor, TFile } from 'obsidian';
-import { spawn, spawnSync } from 'child_process';
-import { join, dirname } from 'path';
-import * as fs from 'fs';
+import {
+    App,
+    ButtonComponent,
+    Editor,
+    ItemView,
+    MarkdownRenderer,
+    Modal,
+    Notice,
+    Plugin,
+    PluginSettingTab,
+    Setting,
+    TFile,
+    WorkspaceLeaf,
+    debounce,
+    setIcon
+} from 'obsidian';
+import { FSRS, generatorParameters, Rating, State, Card as FSRSCard } from 'ts-fsrs';
+import * as CryptoJS from 'crypto-js';
 
-interface FlashcardSettings {
-    // Basic settings
-    deckFolder: string;
-    defaultDeckName: string;
-    defaultTags: string;
+// --- CONSTANTS ---
+const VIEW_TYPE_DASHBOARD = 'fsrs-dashboard-view';
+const ICON_NAME = 'book-heart';
 
-    // Advanced styling
-    customCSS: string;
-    cardStyle: string;
 
-    // Media settings
-    mediaFolder: string;
-
-    // Anki sync settings
-    ankiConnectUrl: string;
-    syncOnCreate: boolean;
-
-    // File management settings
-    keepTempFiles: boolean;
-    tempFileLifespan: number;
-    logRetention: number;
-
-    // Advanced settings
-    debugMode: boolean;
-    pythonPath: string;
-    pythonVenvPath: string;
-    cleanupOnStartup: boolean;
+function generateBlockId(length: number = 6): string {
+    const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    let result = '';
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return `fsrs-${result}`;
 }
 
-const DEFAULT_SETTINGS: FlashcardSettings = {
-    // Basic settings
-    deckFolder: 'Flashcards',
-    defaultDeckName: 'Obsidian',
-    defaultTags: 'obsidian',
-
-    // Advanced styling
-    customCSS: '',
-    cardStyle: 'default',
-
-    // Media settings
-    mediaFolder: 'Flashcards/media',
-
-    // Anki sync settings
-    ankiConnectUrl: 'http://localhost:8765',
-    syncOnCreate: false,
-
-    // File management settings
-    keepTempFiles: false,
-    tempFileLifespan: 24,
-    logRetention: 7,
-
-    // Advanced settings
-    debugMode: false,
-    pythonPath: '',
-    pythonVenvPath: '',
-    cleanupOnStartup: true
-}
-
-// Define a type for the card template keys
-type CardTemplateType = 'basic' | 'cloze' | 'fillInBlank' | 'multipleChoice' | 'trueFalse' | 'math' | 'reversed' | 'imageOcclusion' | 'audio';
-
-// Card templates for different flashcard types
-const CARD_TEMPLATES: Record<CardTemplateType, string> = {
-    basic: `<!-- Anki Card -->
-<!-- type: basic -->
-<!-- front -->
-Enter your question here
-
-<!-- back -->
-Enter your answer here
-<!-- tags: -->
-
----
-`,
-    cloze: `<!-- Anki Card -->
-<!-- type: cloze -->
-<!-- front -->
-This is a {{cloze deletion}} example.
-<!-- tags: -->
-
----
-`,
-    fillInBlank: `<!-- Anki Card -->
-<!-- type: fill-in-the-blank -->
-<!-- front -->
-The process by which plants make their own food using sunlight is called ____________.
-
-<!-- back -->
-photosynthesis
-<!-- tags: -->
-
----
-`,
-    multipleChoice: `<!-- Anki Card -->
-<!-- type: multiple-choice -->
-<!-- front -->
-Which planet is known as the Red Planet?
-
-<!-- options -->
-Venus
-Mars <!-- correct -->
-Jupiter
-Saturn
-
-<!-- back -->
-Mars is often called the Red Planet due to the iron oxide prevalent on its surface.
-<!-- tags: -->
-
----
-`,
-    trueFalse: `<!-- Anki Card -->
-<!-- type: true-false -->
-<!-- front -->
-The Great Wall of China is visible from space with the naked eye.
-
-<!-- back -->
-False. It's a common misconception.
-<!-- correct_answer: False -->
-<!-- tags: -->
-
----
-`,
-    math: `<!-- Anki Card -->
-<!-- type: basic -->
-<!-- front -->
-Solve: $x^2 + 5x + 6 = 0$
-
-<!-- back -->
-$x = -2$ or $x = -3$
-<!-- tags: math -->
-
----
-`,
-    reversed: `<!-- Anki Card -->
-<!-- type: reversed -->
-<!-- front -->
-Term or concept
-
-<!-- back -->
-Definition or explanation
-<!-- tags: -->
-
----
-`,
-    imageOcclusion: `<!-- Anki Card -->
-<!-- type: image-occlusion -->
-<!-- front -->
-![Image description](path/to/image.png)
-
-<!-- masked-areas -->
-[x, y, width, height]
-
-<!-- back -->
-Description of the masked areas
-<!-- tags: -->
-
----
-`,
-    audio: `<!-- Anki Card -->
-<!-- type: audio -->
-<!-- front -->
-Listen and identify:
-[audio:filename.mp3]
-
-<!-- back -->
-Answer
-<!-- tags: -->
-
----
-`
-};
-
-// Note templates with frontmatter
-const NOTE_TEMPLATES: Record<CardTemplateType, string> = {
-    basic: `---
-title: "Basic Flashcards"
-tags: ["flashcards", "anki"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: basic -->
-<!-- front -->
-Enter your question here
-
-<!-- back -->
-Enter your answer here
-<!-- tags: -->
-
----
-`,
-    cloze: `---
-title: "Cloze Flashcards"
-tags: ["flashcards", "anki", "cloze"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: cloze -->
-<!-- front -->
-This is a {{cloze deletion}} example.
-<!-- tags: -->
-
----
-`,
-    fillInBlank: `---
-title: "Fill-in-the-Blank Flashcards"
-tags: ["flashcards", "anki", "fill-blank"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: fill-in-the-blank -->
-<!-- front -->
-The process by which plants make their own food using sunlight is called ____________.
-
-<!-- back -->
-photosynthesis
-<!-- tags: -->
-
----
-`,
-    multipleChoice: `---
-title: "Multiple Choice Flashcards"
-tags: ["flashcards", "anki", "mcq"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: multiple-choice -->
-<!-- front -->
-Which planet is known as the Red Planet?
-
-<!-- options -->
-Venus
-Mars <!-- correct -->
-Jupiter
-Saturn
-
-<!-- back -->
-Mars is often called the Red Planet due to the iron oxide prevalent on its surface.
-<!-- tags: -->
-
----
-`,
-    trueFalse: `---
-title: "True/False Flashcards"
-tags: ["flashcards", "anki", "true-false"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: true-false -->
-<!-- front -->
-The Great Wall of China is visible from space with the naked eye.
-
-<!-- back -->
-False. It's a common misconception.
-<!-- correct_answer: False -->
-<!-- tags: -->
-
----
-`,
-    math: `---
-title: "Math Flashcards"
-tags: ["flashcards", "anki", "math"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: basic -->
-<!-- front -->
-Solve: $x^2 + 5x + 6 = 0$
-
-<!-- back -->
-$x = -2$ or $x = -3$
-<!-- tags: math -->
-
----
-`,
-    reversed: `---
-title: "Reversed Flashcards"
-tags: ["flashcards", "anki", "reversed"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: reversed -->
-<!-- front -->
-Term or concept
-
-<!-- back -->
-Definition or explanation
-<!-- tags: -->
-
----
-`,
-    imageOcclusion: `---
-title: "Image Occlusion Flashcards"
-tags: ["flashcards", "anki", "image-occlusion"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: image-occlusion -->
-<!-- front -->
-![Image description](path/to/image.png)
-
-<!-- masked-areas -->
-[x, y, width, height]
-
-<!-- back -->
-Description of the masked areas
-<!-- tags: -->
-
----
-`,
-    audio: `---
-title: "Audio Flashcards"
-tags: ["flashcards", "anki", "audio"]
-deck: "My Deck"
-style: "default"
----
-
-<!-- Anki Card -->
-<!-- type: audio -->
-<!-- front -->
-Listen and identify:
-[audio:filename.mp3]
-
-<!-- back -->
-Answer
-<!-- tags: -->
-
----
-`
-};
-
-export default class FlashcardMakerPlugin extends Plugin {
-    settings: FlashcardSettings;
-    pythonPath: string | null = null;
-
-    async onload() {
-        await this.loadData();
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, this.settings);
-        
-        // Set up the Python path from settings if available
-        if (this.settings.pythonVenvPath) {
-            // If venv path is provided, construct the python executable path
-            this.pythonPath = join(this.settings.pythonVenvPath, 'bin', 'python3');
-        } else if (this.settings.pythonPath) {
-            this.pythonPath = this.settings.pythonPath;
-        } else {
-            try {
-                this.pythonPath = await this.findSystemPython();
-            } catch (error) {
-                console.error('Failed to find Python:', error);
-                new Notice('Python not found. Please install Python 3.x or set path in settings');
-                return;
-            }
-        }
-
-        // Install required Python packages on startup
-        try {
-            if (this.pythonPath) {
-                await this.ensurePythonPackages(this.pythonPath);
-                if (this.settings.debugMode) {
-                if (this.settings.debugMode) {
-                    console.log('Python packages verified successfully');
-                }
-            }
-            }
-        } catch (error) {
-            console.error('Failed to install Python packages:', error);
-            // Don't fail completely - let user try manual operations
-            new Notice('Warning: Python packages may not be properly installed. Check settings if you encounter issues.');
-        }
-        
-        // Clean up old temp files and logs on startup if enabled
-        if (this.settings.cleanupOnStartup) {
-            await this.cleanupOldFiles();
-            new Notice('Startup cleanup completed');
-        }
-        
-        // Using 'file-plus' icon - a core Obsidian icon that represents creating new items
-        this.addRibbonIcon('file-plus', 'Flashcard Maker', async () => {
-            const activeFile = this.app.workspace.getActiveFile();
-            if (!activeFile) {
-                new Notice('No active file');
-                return;
-            }
-            await this.createFlashcards(activeFile);
-        });
-
-        // Add settings tab
-        this.addSettingTab(new FlashcardSettingTab(this.app, this));
-
-        // Add commands
-        this.addCommand({
-            id: 'create-flashcards',
-            name: 'Create Flashcards from Current Note',
-            callback: async () => {
-                const activeFile = this.app.workspace.getActiveFile();
-                if (!activeFile) {
-                    new Notice('No active file');
-                    return;
-                }
-                await this.createFlashcards(activeFile);
-            }
-        });
-        
-        // Add hotkey commands for different card types
-        this.addCommand({
-            id: 'insert-basic-card',
-            name: 'Insert Basic Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'basic');
-            }
-        });
-        
-        this.addCommand({
-            id: 'insert-cloze-card',
-            name: 'Insert Cloze Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'cloze');
-            }
-        });
-        
-        this.addCommand({
-            id: 'insert-fill-in-blank-card',
-            name: 'Insert Fill-in-the-Blank Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'fillInBlank');
-            }
-        });
-        
-        this.addCommand({
-            id: 'insert-multiple-choice-card',
-            name: 'Insert Multiple Choice Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'multipleChoice');
-            }
-        });
-        
-        this.addCommand({
-            id: 'insert-true-false-card',
-            name: 'Insert True/False Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'trueFalse');
-            }
-        });
-        
-        this.addCommand({
-            id: 'insert-math-card',
-            name: 'Insert Math Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'math');
-            }
-        });
-
-        this.addCommand({
-            id: 'insert-reversed-card',
-            name: 'Insert Reversed Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'reversed');
-            }
-        });
-
-        this.addCommand({
-            id: 'insert-image-occlusion-card',
-            name: 'Insert Image Occlusion Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'imageOcclusion');
-            }
-        });
-
-        this.addCommand({
-            id: 'insert-audio-card',
-            name: 'Insert Audio Card Template',
-            editorCallback: (editor: Editor) => {
-                this.insertTemplate(editor, 'audio');
-            }
-        });
-        
-        // Add commands for creating new notes with templates
-        this.addCommand({
-            id: 'create-basic-note',
-            name: 'Create New Basic Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('basic');
-            }
-        });
-        
-        this.addCommand({
-            id: 'create-cloze-note',
-            name: 'Create New Cloze Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('cloze');
-            }
-        });
-        
-        this.addCommand({
-            id: 'create-fill-blank-note',
-            name: 'Create New Fill-in-the-Blank Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('fillInBlank');
-            }
-        });
-        
-        this.addCommand({
-            id: 'create-mcq-note',
-            name: 'Create New Multiple Choice Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('multipleChoice');
-            }
-        });
-        
-        this.addCommand({
-            id: 'create-true-false-note',
-            name: 'Create New True/False Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('trueFalse');
-            }
-        });
-        
-        this.addCommand({
-            id: 'create-math-note',
-            name: 'Create New Math Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('math');
-            }
-        });
-
-        this.addCommand({
-            id: 'create-reversed-note',
-            name: 'Create New Reversed Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('reversed');
-            }
-        });
-
-        this.addCommand({
-            id: 'create-image-occlusion-note',
-            name: 'Create New Image Occlusion Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('imageOcclusion');
-            }
-        });
-
-        this.addCommand({
-            id: 'create-audio-note',
-            name: 'Create New Audio Flashcard Note',
-            callback: async () => {
-                await this.createNoteWithTemplate('audio');
-            }
-        });
-        
-        // Initialize Python path
-        try {
-            this.pythonPath = await this.findSystemPython();
-        } catch (error) {
-            console.error('Failed to find Python:', error);
-            new Notice('Python not found. Please install Python 3.x');
-        }
+// --- DATA INTERFACES ---
+
+interface FSRSParameters { request_retention: number; maximum_interval: number; w: readonly number[]; }
+interface FSRSSettings { deckTag: string; newCardsPerDay: number; reviewsPerDay: number; fontSize: number; fsrsParams: FSRSParameters; }
+const DEFAULT_SETTINGS: FSRSSettings = { deckTag: 'flashcards', newCardsPerDay: 20, reviewsPerDay: 200, fontSize: 18, fsrsParams: generatorParameters() };
+
+type CardType = 'basic' | 'cloze';
+interface CardData { id: string; deckId: string; filePath: string; type: CardType; originalText: string; front: string; back: string; }
+type FSRSData = FSRSCard;
+interface Card extends CardData { fsrsData?: FSRSData; }
+interface Deck { id: string; title: string; filePath: string; cardIds: Set<string>; stats: { new: number; due: number; learning: number; }; }
+interface ReviewLog { cardId: string; timestamp: number; rating: Rating; }
+interface PluginData { settings: FSRSSettings; cardData: Record<string, FSRSData>; reviewHistory: ReviewLog[]; }
+
+// --- DATA MANAGER ---
+
+class DataManager {
+    private plugin: FSRSFlashcardsPlugin;
+    private fsrs: FSRS;
+    private decks: Map<string, Deck> = new Map();
+    private cards: Map<string, Card> = new Map();
+    private fsrsDataStore: Record<string, FSRSData> = {};
+    private reviewHistory: ReviewLog[] = [];
+
+    constructor(plugin: FSRSFlashcardsPlugin) { this.plugin = plugin; this.fsrs = new FSRS(plugin.settings.fsrsParams); }
+    async load() {
+        const data: PluginData | null = await this.plugin.loadData();
+        const cardData = data?.cardData || {};
+        for (const cardId in cardData) { const card = cardData[cardId]; if (card.due) card.due = new Date(card.due); if (card.last_review) card.last_review = new Date(card.last_review); }
+        this.fsrsDataStore = cardData;
+        this.reviewHistory = data?.reviewHistory || [];
+        await this.buildIndex();
     }
-    
-    // Insert a card template at the current cursor position
-    insertTemplate(editor: Editor, templateType: CardTemplateType): void {
-        const template = CARD_TEMPLATES[templateType];
-        if (template) {
-            // Insert the template at the current cursor position
-            const currentPosition = editor.getCursor();
-            
-            // Add a newline before if we're not at the start of the line
-            const lineContent = editor.getLine(currentPosition.line);
-            const prefix = currentPosition.ch > 0 && lineContent.length > 0 ? '\n' : '';
-            
-            editor.replaceRange(prefix + template + '\n', currentPosition);
-            
-            // Show a brief notice
-            new Notice(`${templateType.charAt(0).toUpperCase() + templateType.slice(1)} card template inserted`);
-        } else {
-            new Notice(`Template for "${templateType}" not found.`);
-        }
+    async save() { await this.plugin.saveData({ settings: this.plugin.settings, cardData: this.fsrsDataStore, reviewHistory: this.reviewHistory }); }
+    updateFsrsParameters(params: FSRSParameters) { this.fsrs = new FSRS(params); }
+    async buildIndex() {
+        console.log("FSRS: Building index...");
+        this.decks.clear(); this.cards.clear();
+        for (const file of this.plugin.app.vault.getMarkdownFiles()) { await this.updateFile(file); }
+        this.recalculateAllDeckStats();
+        console.log(`FSRS: Index complete. Found ${this.decks.size} decks and ${this.cards.size} cards.`);
     }
+    private getDeckId(path: string): string { return CryptoJS.SHA256(path).toString(); }
+    async updateFile(file: TFile) {
+        const deckId = this.getDeckId(file.path);
+        const cache = this.plugin.app.metadataCache.getFileCache(file);
+        const deckTag = `#${this.plugin.settings.deckTag}`;
+        const isDeck = cache?.tags?.some(t => t.tag === deckTag) || cache?.frontmatter?.tags?.includes(this.plugin.settings.deckTag);
+        this.removeDeck(deckId, false);
+        if (!isDeck) return;
 
-    // Create a new note with a flashcard template
-    async createNoteWithTemplate(templateType: CardTemplateType): Promise<void> {
-        const template = NOTE_TEMPLATES[templateType];
-        if (!template) {
-            new Notice(`Template for "${templateType}" not found.`);
-            return;
-        }
+        const title = cache?.frontmatter?.title || file.basename;
+        const newDeck: Deck = { id: deckId, title, filePath: file.path, cardIds: new Set(), stats: { new: 0, due: 0, learning: 0 } };
+        const content = await this.plugin.app.vault.read(file);
 
-        try {
-            // Create a new note with the template
-            const vault = this.app.vault;
-            const templateName = `${templateType.charAt(0).toUpperCase() + templateType.slice(1)} Flashcards`;
-            const fileName = `${templateName}.md`;
+        // Basic Cards
+        const basicCardsRaw = content.split(/---\s*card\s*---/i).slice(1);
+        for (const cardRaw of basicCardsRaw) {
+            const parts = cardRaw.split(/\n---\n/);
+            if (parts.length < 2) continue;
+
+            const frontPart = parts[0];
+            const backPart = parts.slice(1).join('\n---\n');
             
-            // Check if file already exists and create unique name if needed
-            let finalFileName = fileName;
-            let counter = 1;
-            while (await vault.adapter.exists(finalFileName)) {
-                finalFileName = `${templateName} ${counter}.md`;
-                counter++;
-            }
-            
-            // Create the new file with the template content
-            await vault.create(finalFileName, template);
-            
-            // Open the newly created file
-            const file = vault.getAbstractFileByPath(finalFileName);
-            if (file && file instanceof TFile) {
-                await this.app.workspace.getLeaf().openFile(file);
-                new Notice(`Created new ${templateType} flashcard note: ${finalFileName}`);
-            }
-        } catch (error) {
-            console.error('Error creating note with template:', error);
-            new Notice(`Failed to create ${templateType} flashcard note`);
-        }
-    }
+            const blockIdMatch = frontPart.match(/\^([a-zA-Z0-9-]+)\s*$/m);
+            let cardId: string;
+            let front = frontPart.trim();
 
-    async findSystemPython(): Promise<string> {
-        // Check for virtual environment in plugin directory first
-        const vaultPath = (this.app.vault.adapter as any).basePath;
-        const pluginPath = join(vaultPath, '.obsidian', 'plugins', 'flashcard_maker');
-        const venvPythonPath = join(pluginPath, '.venv', 'bin', 'python3');
-
-        // Try plugin's virtual environment Python first
-        try {
-            const result = spawnSync(venvPythonPath, ['--version']);
-            if (result.status === 0) {
-                const versionOutput = result.stdout.toString() || result.stderr.toString();
-                if (versionOutput.toLowerCase().includes('python 3')) {
-                    if (this.settings.debugMode) {
-                        console.log(`Found Python 3 in plugin virtual environment at ${venvPythonPath}`);
-                    }
-                    return venvPythonPath;
-                }
-            }
-        } catch (e) {
-            if (this.settings.debugMode) {
-                console.log('Plugin virtual environment Python not found or not working:', e);
-            }
-        }
-
-        // Check for virtual environment in vault root
-        const vaultVenvPythonPath = join(vaultPath, '.venv', 'bin', 'python3');
-        try {
-            const result = spawnSync(vaultVenvPythonPath, ['--version']);
-            if (result.status === 0) {
-                const versionOutput = result.stdout.toString() || result.stderr.toString();
-                if (versionOutput.toLowerCase().includes('python 3')) {
-                    if (this.settings.debugMode) {
-                        console.log(`Found Python 3 in vault virtual environment at ${vaultVenvPythonPath}`);
-                    }
-                    return vaultVenvPythonPath;
-                }
-            }
-        } catch (e) {
-            if (this.settings.debugMode) {
-                console.log('Vault virtual environment Python not found or not working:', e);
-            }
-        }
-
-        // Check common Python paths
-        const commonPaths = [
-            '/usr/bin/python3',
-            '/usr/local/bin/python3',
-            '/opt/homebrew/bin/python3',
-            'C:\\Python39\\python.exe',
-            'C:\\Python310\\python.exe',
-            'python3',
-            'python',
-        ];
-
-        // Try environment variable first
-        if (process.env.PYTHON_PATH) {
-            try {
-                const result = spawnSync(process.env.PYTHON_PATH, ['--version']);
-                if (result.status === 0) {
-                    if (this.settings.debugMode) {
-                        console.log(`Found Python at ${process.env.PYTHON_PATH}`);
-                    }
-                    return process.env.PYTHON_PATH;
-                }
-            } catch (e) {
-                if (this.settings.debugMode) {
-                    console.log('Failed to use PYTHON_PATH:', e);
-                }
-            }
-        }
-
-        // Try each path
-        for (const path of commonPaths) {
-            try {
-                const result = spawnSync(path, ['--version']);
-                if (result.status === 0) {
-                    // Verify it's Python 3
-                    const versionOutput = result.stdout.toString() || result.stderr.toString();
-                    if (versionOutput.toLowerCase().includes('python 3')) {
-                        if (this.settings.debugMode) {
-                            console.log(`Found Python 3 at ${path}`);
-                        }
-                        return path;
-                    }
-                }
-            } catch (e) {
-                continue;
-            }
-        }
-
-        throw new Error('Python 3.x not found. Please install Python and ensure it is in your PATH');
-    }
-
-    async ensurePythonPackages(pythonPath: string): Promise<void> {
-        return new Promise((resolve, reject) => {
-            // For virtual environment, use the project directory as working directory
-            const vaultPath = (this.app.vault.adapter as any).basePath;
-            const pluginPath = join(vaultPath, '.obsidian', 'plugins', 'flashcard_maker');
-            const cwd = pluginPath;
-
-            // Set up environment for virtual environment
-            const env: { [key: string]: string } = {
-                ...process.env,
-                PYTHONIOENCODING: 'utf-8',
-            };
-
-            // If this is a virtual environment, set up the proper environment variables
-            if (pythonPath.includes('.venv')) {
-                const venvPath = pythonPath.substring(0, pythonPath.indexOf('/bin/python'));
-                const sitePackages = join(venvPath, 'lib', 'python3.13', 'site-packages');
-                
-                // Set PYTHONPATH to include the virtual environment's site-packages
-                env.PYTHONPATH = sitePackages;
-                env.VIRTUAL_ENV = venvPath;
-                env.PATH = `${join(venvPath, 'bin')}:${env.PATH}`;
-                
-                if (this.settings.debugMode) {
-                    console.log('Setting up virtual environment variables:');
-                    console.log('  VIRTUAL_ENV:', env.VIRTUAL_ENV);
-                    console.log('  PYTHONPATH:', env.PYTHONPATH);
-                    console.log('  PATH prefix:', join(venvPath, 'bin'));
-                }
-            }
-
-            // Check if packages are already installed
-            const checkPackages = spawn(pythonPath, [
-                '-c',
-                'import sys; print(f"Python path: {sys.executable}"); import genanki, markdown2, yaml; print("✅ Packages already installed")'
-            ], {
-                cwd: cwd,
-                env: env
-            });
-
-            let stdout = '';
-            let stderr = '';
-
-            checkPackages.stdout.on('data', (data) => {
-                stdout += data.toString();
-            });
-
-            checkPackages.stderr.on('data', (data) => {
-                stderr += data.toString();
-            });
-
-            checkPackages.on('close', async (code) => {
-                if (this.settings.debugMode) {
-                    console.log('Package check stdout:', stdout);
-                    if (stderr) console.log('Package check stderr:', stderr);
-                }
-
-                if (code === 0) {
-                    if (this.settings.debugMode) {
-                        console.log('✅ Python packages are already installed');
-                    }
-                    resolve();
-                    return;
-                }
-
-                // If this is our own venv and packages should be there, try a simple resolve
-                if (pythonPath.includes('.venv') && pythonPath.includes('flashcard_maker')) {
-                    if (this.settings.debugMode) {
-                        console.log('⚠️ Package check failed in our own venv, but packages should be installed');
-                        console.log('This might be a temporary environment issue. Proceeding anyway.');
-                    }
-                    resolve();  // Proceed anyway - packages were verified to be installed
-                    return;
-                }
-
-                // If packages are not installed, try to install them
-                if (this.settings.debugMode) {
-                    console.log('❌ Required Python packages not found, attempting to install...');
-                }
-                
-                // Check if this is a virtual environment and pip is available
-                const pipCheckProcess = spawn(pythonPath, ['-m', 'pip', '--version'], {
-                    cwd: cwd,
-                    env: env
-                });
-
-                let pipCheckStdout = '';
-                let pipCheckStderr = '';
-
-                pipCheckProcess.stdout.on('data', (data) => {
-                    pipCheckStdout += data.toString();
-                });
-
-                pipCheckProcess.stderr.on('data', (data) => {
-                    pipCheckStderr += data.toString();
-                });
-
-                pipCheckProcess.on('close', (pipCheckCode) => {
-                    if (pipCheckCode !== 0) {
-                        console.error('❌ pip is not available in this Python environment');
-                        console.error('pip check stderr:', pipCheckStderr);
-                        reject(new Error(`pip is not available in the Python environment. Please ensure you have a proper virtual environment with pip installed.\nError: ${pipCheckStderr}`));
-                        return;
-                    }
-
-                    if (this.settings.debugMode) {
-                        console.log('✅ pip is available, proceeding with package installation');
-                    }
-                    
-                    // Try to install packages using pip
-                    const installProcess = spawn(pythonPath, [
-                        '-m', 'pip', 'install', '--upgrade', 'pip', 'genanki', 'markdown2', 'pyyaml'
-                    ], {
-                        cwd: cwd,
-                        env: env
-                    });
-
-                    let installStdout = '';
-                    let installStderr = '';
-
-                    installProcess.stdout.on('data', (data) => {
-                        installStdout += data.toString();
-                    });
-
-                    installProcess.stderr.on('data', (data) => {
-                        installStderr += data.toString();
-                    });
-
-                    installProcess.on('close', (installCode) => {
-                        if (this.settings.debugMode) {
-                            console.log('Install stdout:', installStdout);
-                            console.log('Install stderr:', installStderr);
-                        }
-                        
-                        if (installCode === 0) {
-                            if (this.settings.debugMode) {
-                                console.log('✅ Successfully installed Python packages');
-                            }
-                            new Notice('Successfully installed required Python packages');
-                            resolve();
-                        } else {
-                            console.error('❌ Failed to install Python packages');
-                            reject(new Error(`Failed to install Python packages. Please install genanki, markdown2, and pyyaml manually.\n${installStderr}`));
-                        }
-                    });
-
-                    installProcess.on('error', (error) => {
-                        console.error('Failed to start package installation:', error);
-                        reject(new Error(`Failed to install Python packages: ${error.message}`));
-                    });
-                });
-
-                pipCheckProcess.on('error', (error) => {
-                    console.error('Failed to check pip availability:', error);
-                    reject(new Error(`Failed to check pip availability: ${error.message}`));
-                });
-            });
-
-            checkPackages.on('error', (error) => {
-                console.error('Failed to check package installation:', error);
-                reject(new Error(`Failed to check Python packages: ${error.message}`));
-            });
-        });
-    }
-
-    async createFlashcards(file: any) {
-        if (!this.pythonPath) {
-            new Notice('Python is not properly configured. Please check settings.');
-            return;
-        }
-
-        // Get absolute paths using proper path joining
-        const vaultPath = (this.app.vault.adapter as any).basePath;
-        const pluginPath = join(vaultPath, '.obsidian', 'plugins', 'flashcard_maker');
-        const scriptsPath = join(pluginPath, 'scripts');  // Updated to use scripts folder
-        const tempDir = join(pluginPath, 'temp');
-        
-        try {
-            // Pass debug flag to Python
-            if (this.settings.debugMode) {
-                console.log('Debug mode enabled');
-                // Only show one initial debug notification
-                new Notice('Debug mode: Processing flashcards...');
-            }            
-            // Use configured Python packages or ensure needed ones
-            await this.ensurePythonPackages(this.pythonPath);
-            const content = await this.app.vault.read(file);
-            
-            // Create temp directory and ensure it exists
-            try {
-                await fs.promises.mkdir(tempDir, { recursive: true });
-                if (this.settings.debugMode) console.log('Created temp directory at:', tempDir);
-            } catch (err) {
-                console.error('Failed to create temp directory:', err);
-                throw err;
-            }
-
-            // Create a unique temp file name with timestamp to avoid conflicts
-            const timestamp = new Date().getTime();
-            const tempFilePath = join(tempDir, `note_${timestamp}.txt`);
-            // Updated script path to be in scripts folder
-            const pyScriptPath = join(scriptsPath, 'create_flashcards.py');
-            const deckPath = join(vaultPath, this.settings.deckFolder);
-
-            // Verify files and directories - only log to console, not as notifications
-            if (this.settings.debugMode) {
-                console.log('Verifying paths...');
-                console.log('Temp directory exists:', fs.existsSync(tempDir));
-                console.log('Scripts directory exists:', fs.existsSync(scriptsPath));
-                console.log('Python script exists:', fs.existsSync(pyScriptPath));
-            }
-
-            // Make sure Python script exists
-            if (!fs.existsSync(pyScriptPath)) {
-                throw new Error(`Python script not found at: ${pyScriptPath}`);
-            }
-            
-            // Write content to temp file
-            try {
-                await fs.promises.writeFile(tempFilePath, content, 'utf-8');
-                if (this.settings.debugMode) {
-                    console.log('Successfully wrote temp file at:', tempFilePath);
-                }
-            } catch (err) {
-                console.error('Failed to write temp file:', err);
-                throw err;
-            }
-            
-            // Verify temp file was written - log to console only
-            if (this.settings.debugMode) console.log('Temp file exists:', fs.existsSync(tempFilePath));
-            
-            // Create decks folder if it doesn't exist
-            if (!fs.existsSync(deckPath)) {
-                await fs.promises.mkdir(deckPath, { recursive: true });
-                if (this.settings.debugMode) {
-                    console.log('Created deck path directory at:', deckPath);
-                }
-            }
-
-            // Execute Python script with appropriate flags including debug mode if enabled
-            return new Promise((resolve, reject) => {
-                const args = [
-                    pyScriptPath,
-                    tempFilePath,
-                    deckPath,
-                    file.basename || this.settings.defaultDeckName,
-                    this.settings.defaultTags,
-                    '--card-style',
-                    this.settings.cardStyle,
-                    '--custom-css',
-                    this.settings.customCSS  // Add the custom CSS parameter
-                ];
-                
-                // Add debug flag if enabled
-                if (this.settings.debugMode) {
-                    args.push("--debug");
-                    // Only log to console, not as notification
-                    console.log('Debug mode: Executing Python script');
-                }
-                
-                if (this.settings.debugMode) {
-                    console.log('Executing Python with args:', args);
-                    console.log('Python path:', this.pythonPath);
-                }
-                
-                const pythonProcess = spawn(this.pythonPath as string, args, {
-                    cwd: scriptsPath,
-                    env: { 
-                        ...process.env, 
-                        PYTHONPATH: scriptsPath,
-                        PYTHONIOENCODING: 'utf-8',
-                        DEBUG_MODE: this.settings.debugMode ? "1" : "0",
-                        // If using virtual environment, set proper environment
-                        ...(this.pythonPath && this.pythonPath.includes('.venv') ? {
-                            VIRTUAL_ENV: this.pythonPath.substring(0, this.pythonPath.indexOf('/bin/python')),
-                            PATH: `${join(this.pythonPath.substring(0, this.pythonPath.indexOf('/bin/python')), 'bin')}:${process.env.PATH}`
-                        } : {})
-                    }
-                });
-
-                let stdout = '';
-                let stderr = '';
-                
-                // Track if we've already shown a validation summary notification
-                let hasShownValidationNotice = false;
-
-                pythonProcess.stdout.on('data', (data) => {
-                    const output = data.toString();
-                    stdout += output;
-                    if (this.settings.debugMode) {
-                        // Always log to console
-                        console.log('Python stdout:', output);
-                        
-                        // Show at most one validation summary message
-                        if (!hasShownValidationNotice && output.includes('cards passed validation')) {
-                            // Extract just the numeric summary and show that
-                            const validationMatch = output.match(/(\d+) cards passed validation, (\d+) cards rejected, (\d+) cards auto-corrected/);
-                            if (validationMatch) {
-                                const [_, valid, rejected, autocorrected] = validationMatch;
-                                new Notice(`Cards: ${valid} valid, ${rejected} rejected, ${autocorrected} auto-corrected`);
-                                hasShownValidationNotice = true;
-                            }
-                        }
-                    }
-                });
-
-                pythonProcess.stderr.on('data', (data) => {
-                    const output = data.toString();
-                    stderr += output;
-                    console.error('Python stderr:', output);
-                    
-                    // Only show critical errors as notifications, not every message
-                    if (this.settings.debugMode && output.trim() && 
-                        (output.includes('Error:') || output.includes('Exception:') || output.includes('Critical:'))) {
-                        new Notice(`Error: ${output.trim().split('\n')[0].substring(0, 100)}`);
-                    }
-                });
-
-                pythonProcess.on('error', (error) => {
-                    console.error('Failed to start Python process:', error);
-                    reject(error);
-                });
-
-                pythonProcess.on('close', async (code) => {
-                    // Clean up temp file if not keeping them
-                    if (!this.settings.keepTempFiles) {
-                        try {
-                            await fs.promises.unlink(tempFilePath);
-                            if (this.settings.debugMode) {
-                                console.log('Temp file deleted');
-                            }
-                        } catch (err) {
-                            console.error('Failed to delete temp file:', err);
-                        }
-                    }
-                    
-                    if (code === 0) {
-                        // Successfully created the cards
-                        new Notice('Flashcards created successfully!');
-                        
-                        // Try to sync with Anki if enabled
-                        const vaultPath = (this.app.vault.adapter as any).basePath;
-                        const deckPath = join(vaultPath, this.settings.deckFolder);
-                        await this.syncWithAnki(deckPath, file.basename || this.settings.defaultDeckName);
-                        
-                        resolve(stdout);
-                    } else {
-                        const error = new Error(`Python process failed with code ${code}\n${stderr}`);
-                        console.error(error);
-                        new Notice(`Error creating flashcards: ${stderr.split('\n')[0]}`);
-                        reject(error);
-                    }
-                });
-            });
-        } catch (err) {
-            console.error('Detailed error:', err);
-            new Notice(`Error creating flashcards: ${err instanceof Error ? err.message : String(err)}`);
-            throw err;
-        } finally {
-            // Don't delete the temp directory immediately
-            // Let the system clean it up later or on next run
-            if (this.settings.debugMode) {
-                console.log('Finished processing');
-            }
-        }
-    }
-
-    async syncWithAnki(deckPath: string, deckName: string): Promise<boolean> {
-        if (!this.settings.syncOnCreate) {
-            return false;
-        }
-
-        try {
-            // Check if AnkiConnect is available
-            const connectTest = await this.testAnkiConnect();
-            if (!connectTest) {
-                if (this.settings.debugMode) {
-                    console.log('AnkiConnect not available, skipping sync');
-                }
-                return false;
-            }
-
-            // Read the generated .apkg file
-            const apkgPath = join(deckPath, `${deckName}.apkg`);
-            if (!fs.existsSync(apkgPath)) {
-                if (this.settings.debugMode) {
-                    console.error('APKG file not found for sync:', apkgPath);
-                }
-                return false;
-            }
-
-            // Import the deck into Anki
-            const importResult = await this.importDeckToAnki(apkgPath, deckName);
-            if (importResult) {
-                new Notice(`Successfully synced deck "${deckName}" to Anki`);
-                return true;
+            if (blockIdMatch) {
+                cardId = blockIdMatch[1];
+                front = frontPart.replace(/\^([a-zA-Z0-9-]+)\s*$/m, '').trim();
             } else {
-                new Notice('Failed to sync deck to Anki');
-                return false;
+                cardId = CryptoJS.SHA256(file.path + '::' + front).toString();
             }
-        } catch (error) {
-            if (this.settings.debugMode) {
-                console.error('Anki sync error:', error);
-            }
-            new Notice('Failed to sync with Anki');
-            return false;
+
+            const back = backPart.trim();
+            if (!front || !back) continue;
+
+            const card: Card = { id: cardId, deckId, filePath: file.path, type: 'basic', originalText: cardRaw, front, back, fsrsData: this.fsrsDataStore[cardId] };
+            this.cards.set(cardId, card); newDeck.cardIds.add(cardId);
         }
-    }
 
-    async testAnkiConnect(): Promise<boolean> {
-        try {
-            const response = await fetch(this.settings.ankiConnectUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    action: 'version',
-                    version: 6
-                })
-            });
+        // Cloze Deletion Cards
+        const paragraphs = content.split(/\n\s*\n/); 
+        for (const paragraph of paragraphs) {
+            const clozeRegex = /==c(\d+)::(.*?)==/gs;
+            const clozes = [...paragraph.matchAll(clozeRegex)];
 
-            if (!response.ok) {
-                return false;
-            }
+            if (clozes.length === 0) continue;
 
-            const result = await response.json();
-            return result && typeof result.result === 'number';
-        } catch (error) {
-            if (this.settings.debugMode) {
-                console.error('AnkiConnect test failed:', error);
-            }
-            return false;
-        }
-    }
-
-    async importDeckToAnki(apkgPath: string, deckName: string): Promise<boolean> {
-        try {
-            // Read the APKG file as base64
-            const apkgData = await fs.promises.readFile(apkgPath);
-            const base64Data = apkgData.toString('base64');
-
-            const response = await fetch(this.settings.ankiConnectUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    action: 'importPackage',
-                    version: 6,
-                    params: {
-                        base64: base64Data
-                    }
-                })
-            });
-
-            if (!response.ok) {
-                return false;
-            }
-
-            const result = await response.json();
-            return result && result.result !== null;
-        } catch (error) {
-            if (this.settings.debugMode) {
-                console.error('Anki import error:', error);
-            }
-            return false;
-        }
-    }
-
-    async getAnkiDecks(): Promise<string[]> {
-        try {
-            const response = await fetch(this.settings.ankiConnectUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    action: 'deckNames',
-                    version: 6
-                })
-            });
-
-            if (!response.ok) {
-                return [];
-            }
-
-            const result = await response.json();
-            return result.result || [];
-        } catch (error) {
-            if (this.settings.debugMode) {
-                console.error('Failed to get Anki decks:', error);
-            }
-            return [];
-        }
-    }
-
-    async saveSettings() {
-        await this.saveData(this.settings);
-    }
-
-    onunload() {
-        if (this.settings.debugMode) {
-            console.log('Unloading flashcard maker plugin');
-        }
-    }
-
-    // Improved cleanup that actually works
-    async cleanupOldFiles(): Promise<void> {
-        try {
-            const vaultPath = (this.app.vault.adapter as any).basePath;
-            const pluginPath = join(vaultPath, '.obsidian', 'plugins', 'flashcard_maker');
+            const blockIdMatch = paragraph.match(/\^([a-zA-Z0-9-]+)\s*$/);
             
-            if (this.settings.debugMode) {
-                console.log('Starting cleanup process...');
-                console.log('Plugin path:', pluginPath);
-            }
-            
-            // Clean up temp files
-            const tempDir = join(pluginPath, 'temp');
-            await this.cleanupTempFiles(tempDir);
-            
-            // Clean up old logs
-            const logDir = join(pluginPath, 'scripts', 'logs');
-            await this.cleanupLogs(logDir);
-            
-            if (this.settings.debugMode) console.log('Cleanup completed successfully');
-            return Promise.resolve();
-        } catch (error) {
-            console.error('Error during cleanup:', error);
-            if (this.settings.debugMode) {
-                new Notice(`Cleanup error: ${error instanceof Error ? error.message : String(error)}`);
-            }
-            return Promise.reject(error);
-        }
-    }
-    
-    // Better implementation of temp file cleanup
-    async cleanupTempFiles(tempDir: string): Promise<void> {
-        if (!fs.existsSync(tempDir)) {
-            if (this.settings.debugMode) console.log(`Temp directory doesn't exist yet: ${tempDir}`);
-            return Promise.resolve();
-        }
-        
-        const now = new Date();
-        let files;
-        
-        try {
-            files = await fs.promises.readdir(tempDir);
-            if (this.settings.debugMode) console.log(`Found ${files.length} temp files to check`);
-        } catch (error) {
-            console.error(`Failed to read temp directory ${tempDir}:`, error);
-            return Promise.resolve(); // Continue even if we can't read the directory
-        }
-        
-        let deletedCount = 0;
-        const deletePromises = [];
-        
-        for (const file of files) {
-            try {
-                const filePath = join(tempDir, file);
-                const stats = await fs.promises.stat(filePath);
-                
-                // Check if file is older than tempFileLifespan hours
-                const fileAge = (now.getTime() - stats.mtime.getTime()) / (1000 * 60 * 60);
-                
-                if (fileAge > this.settings.tempFileLifespan || !this.settings.keepTempFiles) {
-                    // Delete file asynchronously and collect promises
-                    deletePromises.push(fs.promises.unlink(filePath)
-                        .then(() => {
-                            deletedCount++;
-                            if (this.settings.debugMode) {
-                                console.log(`Deleted temp file: ${file} (age: ${fileAge.toFixed(2)} hours)`);
-                            }
-                        })
-                        .catch(err => console.error(`Failed to delete ${file}:`, err))
-                    );
-                } else if (this.settings.debugMode) {
-                    console.log(`Keeping temp file: ${file} (age: ${fileAge.toFixed(2)} hours)`);
+            clozes.forEach(cloze => {
+                const clozeNum = cloze[1];
+                const clozeText = cloze[2];
+                const originalCloze = cloze[0];
+
+                let cardId: string;
+                if (blockIdMatch) {
+                    cardId = `${blockIdMatch[1]}-${clozeNum}`;
+                } else {
+                    cardId = CryptoJS.SHA256(`${file.path}::${paragraph}::${clozeNum}`).toString();
                 }
-            } catch (error) {
-                console.error(`Failed to process temp file ${file}:`, error);
-            }
+
+                const front = paragraph.replace(originalCloze, '[...]');
+                const back = paragraph.replace(/==c\d+::(.*?)==/g, '$1');
+
+                const card: Card = { id: cardId, deckId, filePath: file.path, type: 'cloze', originalText: paragraph, front, back, fsrsData: this.fsrsDataStore[cardId] };
+                this.cards.set(cardId, card);
+                newDeck.cardIds.add(cardId);
+            });
         }
-        
-        // Wait for all delete operations to complete
-        await Promise.all(deletePromises);
-        
-        if (this.settings.debugMode || deletedCount > 0) {
-            if (this.settings.debugMode) {
-                console.log(`Deleted ${deletedCount} temp files`);
-            }
-            if (deletedCount > 0) {
-                new Notice(`Deleted ${deletedCount} temporary files`);
-            }
-        }
-        
-        return Promise.resolve();
+
+        if (newDeck.cardIds.size > 0) this.decks.set(deckId, newDeck);
     }
-    
-    // Better implementation of log cleanup
-    async cleanupLogs(logDir: string): Promise<void> {
-        if (!fs.existsSync(logDir)) {
-            if (this.settings.debugMode) console.log(`Log directory doesn't exist yet: ${logDir}`);
-            return Promise.resolve();
+    removeDeck(deckId: string, fullDelete: boolean = true) { const deck = this.decks.get(deckId); if (deck) { deck.cardIds.forEach(cardId => { this.cards.delete(cardId); if (fullDelete) delete this.fsrsDataStore[cardId]; }); this.decks.delete(deckId); if (fullDelete) this.save(); } }
+    async renameDeck(file: TFile, oldPath: string) {
+        const oldDeckId = this.getDeckId(oldPath);
+        this.removeDeck(oldDeckId, false); 
+        await this.updateFile(file);
+        await this.save();
+    }
+    recalculateAllDeckStats() { const now = new Date(); for (const deck of this.decks.values()) { deck.stats = { new: 0, due: 0, learning: 0 }; for (const cardId of deck.cardIds) { const fsrsData = this.fsrsDataStore[cardId]; if (!fsrsData || fsrsData.state === State.New) { deck.stats.new++; } else { if (fsrsData.state === State.Learning || fsrsData.state === State.Relearning) deck.stats.learning++; if (fsrsData.due <= now) deck.stats.due++; } } } }
+    getDecks(): Deck[] { return Array.from(this.decks.values()).sort((a, b) => a.title.localeCompare(b.title)); }
+    getAllCards(): Card[] { return Array.from(this.cards.values()); }
+    getReviewQueue(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards.slice(0, this.plugin.settings.reviewsPerDay), ...newCards.slice(0, this.plugin.settings.newCardsPerDay)]; }
+    updateCard(card: Card, rating: Rating) { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const newFsrsData = scheduling_cards[rating as Exclude<Rating, Rating.Manual>].card; this.fsrsDataStore[card.id] = newFsrsData; card.fsrsData = newFsrsData; this.reviewHistory.push({ cardId: card.id, timestamp: now.getTime(), rating }); this.save(); }
+    getNextReviewIntervals(card: Card): Record<Exclude<Rating, Rating.Manual>, string> { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const formatInterval = (days: number): string => { if (days < 1) return "<1d"; if (days < 30) return `${Math.round(days)}d`; if (days < 365) return `${(days / 30).toFixed(1)}m`; return `${(days / 365).toFixed(1)}y`; }; return { [Rating.Again]: formatInterval(scheduling_cards[Rating.Again].card.scheduled_days), [Rating.Hard]: formatInterval(scheduling_cards[Rating.Hard].card.scheduled_days), [Rating.Good]: formatInterval(scheduling_cards[Rating.Good].card.scheduled_days), [Rating.Easy]: formatInterval(scheduling_cards[Rating.Easy].card.scheduled_days), }; }
+    getStats() { const now = new Date(); const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const reviewsToday = this.reviewHistory.filter(log => log.timestamp >= todayStart); const activity = new Array(30).fill(0); this.reviewHistory.forEach(log => { const daysAgo = Math.floor((now.getTime() - log.timestamp) / (1000 * 60 * 60 * 24)); if (daysAgo < 30) activity[29 - daysAgo]++; }); const forecast = new Array(7).fill(0); let mature = 0, learning = 0, young = 0, total = 0; for(const card of this.cards.values()) { const data = this.fsrsDataStore[card.id]; if (data) { total++; if (data.due <= now) { const daysForward = Math.floor((data.due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)); if (daysForward < 7 && daysForward >= 0) forecast[daysForward]++; } if (data.stability >= 21) mature++; else if (data.state === State.Review) young++; else learning++; } } return { reviewsToday: reviewsToday.length, activity, forecast, maturity: { mature, young, learning, new: this.cards.size - total } }; }
+}
+
+// --- UI: DASHBOARD VIEW ---
+class DashboardView extends ItemView {
+    private plugin: FSRSFlashcardsPlugin; constructor(leaf: WorkspaceLeaf, plugin: FSRSFlashcardsPlugin) { super(leaf); this.plugin = plugin; }
+    getViewType(): string { return VIEW_TYPE_DASHBOARD; } getDisplayText(): string { return 'FSRS Decks'; } getIcon(): string { return ICON_NAME; }
+    async onOpen() { this.render(); }
+    render() { this.contentEl.empty(); this.contentEl.style.padding = "var(--size-4-4)"; this.renderHeader(); this.renderDecks(); }
+    private renderHeader() {
+        const headerEl = this.contentEl.createDiv(); const setting = new Setting(headerEl).setName("Flashcard Decks").setHeading();
+        setting.addExtraButton(btn => btn.setIcon('bar-chart-3').setTooltip('View Statistics').onClick(() => new StatsModal(this.app, this.plugin).open()));
+        setting.addExtraButton(btn => btn.setIcon('filter').setTooltip('Custom Study Session').onClick(() => new CustomStudyModal(this.app, this.plugin).open()));
+        setting.addExtraButton(btn => btn.setIcon('refresh-cw').setTooltip('Refresh decks from vault').onClick(async () => { new Notice('Refreshing decks...'); await this.plugin.dataManager.buildIndex(); this.render(); new Notice('Decks refreshed!'); }));
+        const decks = this.plugin.dataManager.getDecks(); const globalStats = decks.reduce((acc, deck) => { acc.new += deck.stats.new; acc.due += deck.stats.due; acc.total += deck.cardIds.size; return acc; }, { new: 0, due: 0, total: 0 });
+        const statsContainer = this.contentEl.createDiv({ cls: 'fsrs-global-stats' }); statsContainer.createEl('p', { text: `Total Cards: ${globalStats.total}`}); statsContainer.createEl('p', { text: `Due: `}).createEl('span', { text: `${globalStats.due}`, attr: { style: 'color: var(--color-red); font-weight: bold;'} }); statsContainer.createEl('p', { text: `New: `}).createEl('span', { text: `${globalStats.new}`, attr: { style: 'color: var(--color-blue); font-weight: bold;'} });
+    }
+    private renderDecks() { const decks = this.plugin.dataManager.getDecks(); if (decks.length === 0) { this.renderEmptyState(); return; } decks.forEach(deck => { const total = deck.cardIds.size; const setting = new Setting(this.contentEl).setName(deck.title).setDesc(`Due: ${deck.stats.due} • New: ${deck.stats.new} • Total: ${total}`).addButton(button => button.setButtonText('Study Now').setCta().onClick(() => { const queue = this.plugin.dataManager.getReviewQueue(deck.id); if (queue.length === 0) { new Notice('No cards to review in this deck!'); return; } new ReviewModal(this.app, this.plugin, queue).open(); })); setting.nameEl.style.cursor = "pointer"; setting.nameEl.addEventListener('click', () => { this.app.workspace.openLinkText(deck.filePath, deck.filePath); }); }); }
+    private renderEmptyState() { const emptyStateEl = this.contentEl.createDiv({ cls: 'fsrs-empty-state' }); emptyStateEl.createEl('h2', { text: 'No Decks Found' }); emptyStateEl.createEl('p', { text: `Create a new note and add the tag #${this.plugin.settings.deckTag} to get started.` }); }
+}
+
+// --- UI: REVIEW MODAL ---
+class ReviewModal extends Modal {
+    private plugin: FSRSFlashcardsPlugin; private queue: Card[]; private currentCardIndex = 0; private state: 'question' | 'answer' = 'question'; private cardContainer: HTMLElement; private frontEl: HTMLElement; private backEl: HTMLElement; private answerContainer: HTMLElement; private controlsContainer: HTMLElement; private showAnswerButton: ButtonComponent;
+    constructor(app: App, plugin: FSRSFlashcardsPlugin, queue: Card[]) { super(app); this.plugin = plugin; this.queue = queue; this.modalEl.addClass('fsrs-review-modal'); }
+    onOpen() { this.contentEl.empty(); this.titleEl.setText(`Reviewing (${this.currentCardIndex + 1}/${this.queue.length})`); this.setupUI(); this.showNextCard(); this.scope.register([], 'keydown', this.handleKeyPress.bind(this)); }
+    onClose() { this.contentEl.empty(); this.plugin.refreshDashboardView(); }
+    private setupUI() { const card = this.getCurrentCard(); this.modalEl.find('.modal-title').addEventListener('click', () => { const data = card.fsrsData; if (!data) { new Notice("This is a new card."); return; } const info = `Stability: ${data.stability.toFixed(2)}\nDifficulty: ${data.difficulty.toFixed(2)}\nReps: ${data.reps}\nLapses: ${data.lapses}\nDue: ${data.due.toLocaleDateString()}`; new Notice(info, 10000); }); this.modalEl.find('.modal-title').style.cursor = 'help'; this.addExtraButton('edit', 'Edit this card', () => { this.app.workspace.openLinkText(card.filePath, card.filePath); this.close(); }); const container = this.contentEl.createDiv({ cls: 'fsrs-review-container' }); this.cardContainer = container.createDiv({ cls: 'fsrs-review-card' }); this.cardContainer.style.fontSize = `${this.plugin.settings.fontSize}px`; this.frontEl = this.cardContainer.createDiv({ cls: 'fsrs-card-front' }); this.answerContainer = this.cardContainer.createDiv({ cls: 'fsrs-card-answer', attr: { 'hidden': 'true' }}); this.answerContainer.createEl('hr'); this.backEl = this.answerContainer.createDiv({ cls: 'fsrs-card-back' }); const buttonContainer = container.createDiv({ cls: 'fsrs-button-container' }); this.showAnswerButton = new ButtonComponent(buttonContainer).setButtonText('Show Answer').setCta().onClick(() => this.showAnswer()); this.showAnswerButton.buttonEl.style.width = '100%'; this.showAnswerButton.buttonEl.style.marginBottom = 'var(--size-4-4)'; this.controlsContainer = container.createDiv({ cls: 'fsrs-review-controls', attr: { 'hidden': 'true' }}); }
+    private addExtraButton(icon: string, tooltip: string, action: () => void) { const btn = this.modalEl.createDiv({ cls: 'modal-close-button' }); setIcon(btn, icon); btn.setAttribute('aria-label', tooltip); btn.addEventListener('click', action); }
+    private createControlButtons() { this.controlsContainer.empty(); this.controlsContainer.style.display = 'grid'; this.controlsContainer.style.gridTemplateColumns = 'repeat(4, 1fr)'; this.controlsContainer.style.gap = 'var(--size-4-2)'; const card = this.getCurrentCard(); const intervals = this.plugin.dataManager.getNextReviewIntervals(card); const createButton = (text: string, rating: Rating, interval: string) => { const btn = new ButtonComponent(this.controlsContainer).onClick(() => this.handleRating(rating)); btn.buttonEl.style.flexDirection = 'column'; btn.buttonEl.style.height = 'auto'; btn.buttonEl.style.padding = 'var(--size-4-2)'; btn.buttonEl.createEl('strong', { text }); btn.buttonEl.createEl('small', { text: interval, cls: 'text-muted' }); return btn; }; createButton('Again', Rating.Again, intervals[Rating.Again]).setWarning(); createButton('Hard', Rating.Hard, intervals[Rating.Hard]); createButton('Good', Rating.Good, intervals[Rating.Good]).setCta(); createButton('Easy', Rating.Easy, intervals[Rating.Easy]); }
+    private showNextCard() { if (this.currentCardIndex >= this.queue.length) { this.showCompletionScreen(); return; } this.state = 'question'; const card = this.getCurrentCard(); this.titleEl.setText(`Reviewing (${this.currentCardIndex + 1}/${this.queue.length})`); this.frontEl.empty(); this.backEl.empty(); MarkdownRenderer.render(this.app, card.front, this.frontEl, card.filePath, this.plugin); MarkdownRenderer.render(this.app, card.back, this.backEl, card.filePath, this.plugin); this.showAnswerButton.buttonEl.removeAttribute('hidden'); this.controlsContainer.setAttribute('hidden', 'true'); this.answerContainer.setAttribute('hidden', 'true'); this.createControlButtons(); }
+    private showAnswer() { if (this.state === 'answer') return; this.state = 'answer'; this.showAnswerButton.buttonEl.setAttribute('hidden', 'true'); this.controlsContainer.removeAttribute('hidden'); this.answerContainer.removeAttribute('hidden'); }
+    private handleRating(rating: Rating) { this.plugin.dataManager.updateCard(this.getCurrentCard(), rating); this.currentCardIndex++; this.cardContainer.style.transition = 'opacity 0.2s ease-in-out'; this.cardContainer.style.opacity = '0'; setTimeout(() => { this.showNextCard(); this.cardContainer.style.opacity = '1'; }, 200); }
+    private showCompletionScreen() { this.contentEl.empty(); this.titleEl.setText('Session Complete!'); const container = this.contentEl.createDiv({cls: 'fsrs-completion-screen'}); container.createEl('h2', { text: 'Great work!' }); container.createEl('p', { text: `You have completed ${this.queue.length} cards.` }); new ButtonComponent(container).setButtonText('Return to Dashboard').setCta().onClick(() => this.close()); }
+    private handleKeyPress(evt: KeyboardEvent) { if (this.state === 'question' && (evt.key === ' ' || evt.key === 'Enter')) { evt.preventDefault(); this.showAnswer(); } else if (this.state === 'answer') { evt.preventDefault(); switch (evt.key) { case '1': this.handleRating(Rating.Again); break; case '2': this.handleRating(Rating.Hard); break; case '3': this.handleRating(Rating.Good); break; case '4': this.handleRating(Rating.Easy); break; } } }
+    private getCurrentCard(): Card { return this.queue[this.currentCardIndex]; }
+}
+
+// --- UI: STATS MODAL ---
+class StatsModal extends Modal {
+    private plugin: FSRSFlashcardsPlugin; constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app); this.plugin = plugin; }
+    onOpen() {
+        this.contentEl.empty(); this.titleEl.setText("Statistics");
+        const stats = this.plugin.dataManager.getStats();
+        new Setting(this.contentEl).setName("Reviews Today").setDesc(stats.reviewsToday.toString()).setHeading();
+        
+        this.contentEl.createEl('h3', { text: "30-Day Activity" });
+        const activityContainer = this.contentEl.createDiv({ attr: { style: 'font-family: monospace; white-space: pre; line-height: 1.2;'} });
+        const maxActivity = Math.max(...stats.activity, 1);
+        let activityHtml = '';
+        for (let i = 0; i < 30; i++) {
+            const barCount = Math.ceil((stats.activity[i] / maxActivity) * 10);
+            activityHtml += `|${'█'.repeat(barCount)}${' '.repeat(10 - barCount)}| ${stats.activity[i]}\n`;
         }
-        
-        const now = new Date();
-        let files;
-        
-        try {
-            files = await fs.promises.readdir(logDir);
-            if (this.settings.debugMode) console.log(`Found ${files.length} log files to check`);
-        } catch (error) {
-            console.error(`Failed to read log directory ${logDir}:`, error);
-            return Promise.resolve(); // Continue even if we can't read the directory
+        activityContainer.setText(activityHtml);
+
+        new Setting(this.contentEl).setName("7-Day Forecast").setDesc(`${stats.forecast.reduce((a, b) => a + b, 0)} reviews due`).setHeading();
+        const forecastContainer = this.contentEl.createDiv({ attr: { style: 'display: flex; justify-content: space-around; text-align: center;'} });
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        for (let i = 0; i < 7; i++) {
+            const dayWrapper = forecastContainer.createDiv();
+            const day = new Date(); day.setDate(day.getDate() + i);
+            dayWrapper.createDiv({ text: days[day.getDay()] });
+            dayWrapper.createDiv({ text: stats.forecast[i].toString(), attr: { style: 'font-size: 1.5em; font-weight: bold;'} });
         }
-        
-        let deletedCount = 0;
-        const deletePromises = [];
-        
-        for (const file of files) {
-            try {
-                if (!file.endsWith('.log')) continue;
-                
-                const filePath = join(logDir, file);
-                const stats = await fs.promises.stat(filePath);
-                
-                // Check if file is older than logRetention days
-                const fileAge = (now.getTime() - stats.mtime.getTime()) / (1000 * 60 * 60 * 24);
-                
-                if (fileAge > this.settings.logRetention) {
-                    // Delete file asynchronously and collect promises
-                    deletePromises.push(fs.promises.unlink(filePath)
-                        .then(() => {
-                            deletedCount++;
-                            if (this.settings.debugMode) {
-                                console.log(`Deleted log file: ${file} (age: ${fileAge.toFixed(2)} days)`);
-                            }
-                        })
-                        .catch(err => console.error(`Failed to delete ${file}:`, err))
-                    );
-                } else if (this.settings.debugMode) {
-                    console.log(`Keeping log file: ${file} (age: ${fileAge.toFixed(2)} days)`);
-                }
-            } catch (error) {
-                console.error(`Failed to process log file ${file}:`, error);
-            }
-        }
-        
-        // Wait for all delete operations to complete
-        await Promise.all(deletePromises);
-        
-        if (this.settings.debugMode || deletedCount > 0) {
-            if (this.settings.debugMode) {
-                console.log(`Deleted ${deletedCount} log files`);
-            }
-            if (deletedCount > 0) {
-                new Notice(`Deleted ${deletedCount} log files`);
-            }
-        }
-        
-        return Promise.resolve();
+
+        new Setting(this.contentEl).setName("Card Maturity").setDesc(`${stats.maturity.mature + stats.maturity.young + stats.maturity.learning + stats.maturity.new} total cards`).setHeading();
+        const maturityContainer = this.contentEl.createDiv({ attr: { style: 'display: flex; flex-direction: column; gap: 5px;'} });
+        maturityContainer.createEl('p', { text: `Mature (interval > 21d): ${stats.maturity.mature}` });
+        maturityContainer.createEl('p', { text: `Young: ${stats.maturity.young}` });
+        maturityContainer.createEl('p', { text: `Learning: ${stats.maturity.learning}` });
+        maturityContainer.createEl('p', { text: `New: ${stats.maturity.new}` });
     }
 }
 
-
-class FlashcardSettingTab extends PluginSettingTab {
-    plugin: FlashcardMakerPlugin;
-    customTemplatesList: HTMLElement;
-
-    constructor(app: App, plugin: FlashcardMakerPlugin) {
-        super(app, plugin);
-        this.plugin = plugin;
+// --- UI: CUSTOM STUDY MODAL ---
+class CustomStudyModal extends Modal {
+    private plugin: FSRSFlashcardsPlugin; private tags: string = ""; private state: "new" | "due" | "learning" = "due"; private limit: number = 50;
+    constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app); this.plugin = plugin; }
+    onOpen() {
+        this.contentEl.empty(); this.titleEl.setText("Custom Study Session");
+        new Setting(this.contentEl).setName("Filter by Tags").setDesc("Comma-separated, e.g., #calculus, #chapter1").addText(text => text.setValue(this.tags).onChange(val => this.tags = val));
+        new Setting(this.contentEl).setName("Filter by Card State").addDropdown(dd => dd.addOption("due", "Due").addOption("new", "New").addOption("learning", "Learning").setValue(this.state).onChange(val => this.state = val as any));
+        new Setting(this.contentEl).setName("Card Limit").addText(text => text.setValue(this.limit.toString()).onChange(val => this.limit = parseInt(val) || 50));
+        new Setting(this.contentEl).addButton(btn => btn.setButtonText("Start Studying").setCta().onClick(() => this.startSession()));
     }
-
-    display(): void {
-        const {containerEl} = this;
-        containerEl.empty();
-
-        // General Settings Section
-        containerEl.createEl('h2', {text: 'Flashcard Maker Settings'});
+    startSession() {
+        const now = new Date();
+        const allCards = this.plugin.dataManager.getAllCards();
+        const requiredTags = this.tags.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
         
-        const generalSection = containerEl.createEl('div', {cls: 'setting-section'});
-        generalSection.createEl('h3', {text: 'General Settings'});
-        
-        new Setting(generalSection)
-            .setName('Deck Folder')
-            .setDesc('Folder where deck files will be saved')
-            .addText(text => text
-                .setPlaceholder('Flashcards')
-                .setValue(this.plugin.settings.deckFolder)
-                .onChange(async (value) => {
-                    this.plugin.settings.deckFolder = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(generalSection)
-            .setName('Default Deck Name')
-            .setDesc('Default name for new decks')
-            .addText(text => text
-                .setPlaceholder('Obsidian')
-                .setValue(this.plugin.settings.defaultDeckName)
-                .onChange(async (value) => {
-                    this.plugin.settings.defaultDeckName = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(generalSection)
-            .setName('Default Tags')
-            .setDesc('Default tags for new cards (comma-separated)')
-            .addText(text => text
-                .setPlaceholder('obsidian, learning')
-                .setValue(this.plugin.settings.defaultTags)
-                .onChange(async (value) => {
-                    this.plugin.settings.defaultTags = value;
-                    await this.plugin.saveSettings();
-                }));
-        
-        new Setting(generalSection)
-            .setName('Card Style')
-            .setDesc('Choose the visual style for your flashcards')
-            .addDropdown(dropdown => dropdown
-                .addOption('default', 'Modern (Default)')
-                .setValue(this.plugin.settings.cardStyle)
-                .onChange(async (value) => {
-                    this.plugin.settings.cardStyle = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        // Custom CSS Section
-        const cssSection = containerEl.createEl('div', {cls: 'setting-section'});
-        cssSection.createEl('h3', {text: 'Custom Styling'});
-
-        new Setting(cssSection)
-            .setName('Custom CSS')
-            .setDesc('Additional CSS to apply to all flashcards')
-            .addTextArea(text => text
-                .setPlaceholder('/* Add your custom CSS here */\n.card { /* your styles */ }')
-                .setValue(this.plugin.settings.customCSS)
-                .onChange(async (value) => {
-                    this.plugin.settings.customCSS = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        // Media Section
-        const mediaSection = containerEl.createEl('div', {cls: 'setting-section'});
-        mediaSection.createEl('h3', {text: 'Media Settings'});
-
-        // Hotkeys Section
-        const hotkeysSection = containerEl.createEl('div', {cls: 'setting-section'});
-        hotkeysSection.createEl('h3', {text: 'Flashcard Templates Hotkeys'});
-        
-        const hotkeyInfo = hotkeysSection.createEl('div', {cls: 'flashcard-hotkey-info'});
-        hotkeyInfo.innerHTML = `
-            <p>You can assign hotkeys to quickly insert different flashcard templates into your notes.</p>
-            <ol>
-                <li>Go to <strong>Settings → Hotkeys</strong> in Obsidian</li>
-                <li>Search for "flashcard" or "insert"</li>
-                <li>Assign your preferred key combinations to each card type</li>
-            </ol>
-            <p>The following commands are available for hotkeys:</p>
-        `;
-        
-        const hotkeyTable = hotkeysSection.createEl('table', {cls: 'flashcards-hotkey-table'});
-        const tableHead = hotkeyTable.createEl('thead');
-        const headerRow = tableHead.createEl('tr');
-        headerRow.createEl('th', {text: 'Card Type'});
-        headerRow.createEl('th', {text: 'Command ID'});
-        headerRow.createEl('th', {text: 'Description'});
-        
-        const tableBody = hotkeyTable.createEl('tbody');
-        
-        this.addHotkeyRow(tableBody, 'Basic', 'flashcard-maker:insert-basic-card', 'Question and answer card');
-        this.addHotkeyRow(tableBody, 'Cloze', 'flashcard-maker:insert-cloze-card', 'Text with hidden portions to recall');
-        this.addHotkeyRow(tableBody, 'Fill-in-the-Blank', 'flashcard-maker:insert-fill-in-blank-card', 'Question with blank space to complete');
-        this.addHotkeyRow(tableBody, 'Multiple Choice', 'flashcard-maker:insert-multiple-choice-card', 'Question with multiple options');
-        this.addHotkeyRow(tableBody, 'True/False', 'flashcard-maker:insert-true-false-card', 'Statement to evaluate as true or false');
-        this.addHotkeyRow(tableBody, 'Math', 'flashcard-maker:insert-math-card', 'Card with LaTeX math equations');
-        this.addHotkeyRow(tableBody, 'Reversed', 'flashcard-maker:insert-reversed-card', 'Card with front/back swapped');
-        this.addHotkeyRow(tableBody, 'Image Occlusion', 'flashcard-maker:insert-image-occlusion-card', 'Card with masked image areas');
-        this.addHotkeyRow(tableBody, 'Audio', 'flashcard-maker:insert-audio-card', 'Card with audio content');
-        
-        // Advanced Settings Section
-        const advancedSection = containerEl.createEl('div', {cls: 'setting-section'});
-        advancedSection.createEl('h3', {text: 'Advanced Settings'});
-        
-        new Setting(advancedSection)
-            .setName('Media Folder')
-            .setDesc('Folder where media files will be stored')
-            .addText(text => text
-                .setPlaceholder('Flashcards/media')
-                .setValue(this.plugin.settings.mediaFolder)
-                .onChange(async (value) => {
-                    this.plugin.settings.mediaFolder = value;
-                    await this.plugin.saveSettings();
-                }));
-        
-        new Setting(advancedSection)
-            .setName('AnkiConnect URL')
-            .setDesc('URL for AnkiConnect')
-            .addText(text => text
-                .setPlaceholder('http://localhost:8765')
-                .setValue(this.plugin.settings.ankiConnectUrl)
-                .onChange(async (value) => {
-                    this.plugin.settings.ankiConnectUrl = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(advancedSection)
-            .setName('Test Python Setup')
-            .setDesc('Test if Python and required packages are working correctly')
-            .addButton(button => button
-                .setButtonText('Test Setup')
-                .onClick(async () => {
-                    if (!this.plugin.pythonPath) {
-                        new Notice('No Python path configured');
-                        return;
-                    }
-                    
-                    try {
-                        await this.plugin.ensurePythonPackages(this.plugin.pythonPath);
-                        new Notice('✅ Python setup is working correctly!');
-                    } catch (error) {
-                        new Notice(`❌ Python setup test failed: ${error instanceof Error ? error.message : String(error)}`);
-                        console.error('Python setup test failed:', error);
-                    }
-                }));
-
-        new Setting(advancedSection)
-            .setName('Test AnkiConnect')
-            .setDesc('Test connection to AnkiConnect')
-            .addButton(button => button
-                .setButtonText('Test Connection')
-                .onClick(async () => {
-                    const isConnected = await this.plugin.testAnkiConnect();
-                    if (isConnected) {
-                        new Notice('AnkiConnect connection successful');
-                    } else {
-                        new Notice('AnkiConnect connection failed. Make sure Anki is running with AnkiConnect enabled.');
-                    }
-                }));
-
-        new Setting(advancedSection)
-            .setName('Sync on Create')
-            .setDesc('Sync with Anki on card creation')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.syncOnCreate)
-                .onChange(async (value) => {
-                    this.plugin.settings.syncOnCreate = value;
-                    await this.plugin.saveSettings();
-                }));
-        
-        new Setting(advancedSection)
-            .setName('Keep Temporary Files')
-            .setDesc('Keep temporary files for debugging purposes')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.keepTempFiles)
-                .onChange(async (value) => {
-                    this.plugin.settings.keepTempFiles = value;
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Temporary File Lifespan')
-            .setDesc('How long to keep temporary files before cleanup (in hours)')
-            .addSlider(slider => slider
-                .setLimits(1, 168, 1)
-                .setValue(this.plugin.settings.tempFileLifespan)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.tempFileLifespan = value;
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Log Retention')
-            .setDesc('How many days to keep log files')
-            .addSlider(slider => slider
-                .setLimits(1, 30, 1)
-                .setValue(this.plugin.settings.logRetention)
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.logRetention = value;
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Clean up on Startup')
-            .setDesc('Automatically clean up old temp files and logs when starting Obsidian')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.cleanupOnStartup)
-                .onChange(async (value) => {
-                    this.plugin.settings.cleanupOnStartup = value;
-                    await this.plugin.saveSettings();
-                }));
-        
-        new Setting(advancedSection)
-            .setName('Manual Cleanup')
-            .setDesc('Delete all old temporary files and logs now')
-            .addButton(button => button
-                .setButtonText('Clean Now')
-                .onClick(async () => {
-                    await this.plugin.cleanupOldFiles();
-                    new Notice('Cleanup completed');
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Debug Mode')
-            .setDesc('Enable verbose logging for troubleshooting')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.debugMode)
-                .onChange(async (value) => {
-                    this.plugin.settings.debugMode = value;
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Python Virtual Environment Path')
-            .setDesc('Path to Python virtual environment directory (e.g., /path/to/.venv)')
-            .addText(text => text
-                .setPlaceholder('/path/to/.venv')
-                .setValue(this.plugin.settings.pythonVenvPath)
-                .onChange(async (value) => {
-                    this.plugin.settings.pythonVenvPath = value;
-                    if (value) {
-                        this.plugin.pythonPath = join(value, 'bin', 'python3');
-                    } else if (this.plugin.settings.pythonPath) {
-                        this.plugin.pythonPath = this.plugin.settings.pythonPath;
-                    } else {
-                        // Auto-detect if both fields cleared
-                        try {
-                            this.plugin.pythonPath = await this.plugin.findSystemPython();
-                            new Notice(`Python found at: ${this.plugin.pythonPath}`);
-                        } catch (error) {
-                            console.error('Failed to find Python:', error);
-                            new Notice('Python not found. Please install Python 3.x');
-                        }
-                    }
-                    await this.plugin.saveSettings();
-                }));
-                
-        new Setting(advancedSection)
-            .setName('Python Executable Path')
-            .setDesc('Custom path to Python executable (leave empty for auto-detection)')
-            .addText(text => text
-                .setPlaceholder('/usr/bin/python3')
-                .setValue(this.plugin.settings.pythonPath)
-                .onChange(async (value) => {
-                    this.plugin.settings.pythonPath = value;
-                    if (value) {
-                        this.plugin.pythonPath = value;
-                    } else if (this.plugin.settings.pythonVenvPath) {
-                        this.plugin.pythonPath = join(this.plugin.settings.pythonVenvPath, 'bin', 'python3');
-                    } else {
-                        // Auto-detect if field cleared
-                        try {
-                            this.plugin.pythonPath = await this.plugin.findSystemPython();
-                            new Notice(`Python found at: ${this.plugin.pythonPath}`);
-                        } catch (error) {
-                            console.error('Failed to find Python:', error);
-                            new Notice('Python not found. Please install Python 3.x');
-                        }
-                    }
-                    await this.plugin.saveSettings();
-                }));
-
-        // Add custom CSS for the table
-        const customCss = document.createElement('style');
-        customCss.textContent = `
-            .setting-section {
-                margin-bottom: 30px;
-                padding-bottom: 20px;
-                border-bottom: 1px solid var(--background-modifier-border);
+        const queue = allCards.filter(card => {
+            const data = card.fsrsData;
+            const cardState = !data ? "new" : data.due <= now ? "due" : "learning";
+            if (this.state !== cardState) return false;
+            if (requiredTags.length > 0) {
+                const fileCache = this.app.metadataCache.getCache(card.filePath);
+                const fileTags = (fileCache?.tags?.map(t => t.tag.toLowerCase()) || []).concat(fileCache?.frontmatter?.tags?.map((t: string) => `#${t.toLowerCase()}`) || []);
+                return requiredTags.every(reqTag => fileTags.includes(reqTag));
             }
-            .setting-section:last-child {
-                border-bottom: none;
-            }
-            .flashcards-hotkey-table {
-                width: 100%;
-                border-collapse: collapse;
-                margin: 15px 0;
-            }
-            .flashcards-hotkey-table th,
-            .flashcards-hotkey-table td {
-                border: 1px solid var(--background-modifier-border);
-                padding: 8px 12px;
-                text-align: left;
-            }
-            .flashcards-hotkey-table th {
-                background-color: var(--background-secondary);
-                font-weight: bold;
-            }
-            .flashcards-hotkey-table tr:nth-child(even) {
-                background-color: var(--background-secondary-alt);
-            }
-            .flashcard-hotkey-info {
-                background-color: var(--background-primary-alt);
-                border-radius: 5px;
-                padding: 10px 15px;
-                margin: 10px 0;
-            }
-        `;
-        document.head.appendChild(customCss);
+            return true;
+        }).slice(0, this.limit);
+
+        if (queue.length === 0) { new Notice("No cards found matching your criteria."); return; }
+        this.close();
+        new ReviewModal(this.app, this.plugin, queue).open();
     }
+}
 
-    addHotkeyRow(tableBody: HTMLElement, type: string, commandId: string, description: string): void {
-        const row = tableBody.createEl('tr');
-        row.createEl('td', {text: type});
-        row.createEl('td', {text: commandId});
-        row.createEl('td', {text: description});
-    }
+// --- UI: SETTINGS TAB ---
+class FSRSSettingsTab extends PluginSettingTab {
+    plugin: FSRSFlashcardsPlugin; constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app, plugin); this.plugin = plugin; }
+    display(): void { const { containerEl } = this; containerEl.empty(); containerEl.createEl('h1', { text: 'FSRS Flashcards Settings' }); new Setting(containerEl).setName('Deck Tag').setDesc('The tag to identify deck files (e.g., "flashcards" for #flashcards).').addText(text => text.setPlaceholder('flashcards').setValue(this.plugin.settings.deckTag).onChange(async (value) => { this.plugin.settings.deckTag = value.trim(); await this.plugin.saveSettings(); await this.plugin.dataManager.buildIndex(); this.plugin.refreshDashboardView(); })); containerEl.createEl('h2', { text: 'Global Review Settings' }); new Setting(containerEl).setName('Max new cards per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.newCardsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.newCardsPerDay = num; await this.plugin.saveSettings(); } })); new Setting(containerEl).setName('Max reviews per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.reviewsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.reviewsPerDay = num; await this.plugin.saveSettings(); } })); containerEl.createEl('h2', { text: 'Appearance' }); new Setting(containerEl).setName('Review font size').addSlider(slider => slider.setLimits(12, 32, 1).setValue(this.plugin.settings.fontSize).setDynamicTooltip().onChange(async (value) => { this.plugin.settings.fontSize = value; await this.plugin.saveSettings(); })); containerEl.createEl('h2', { text: 'FSRS Parameters' }); containerEl.createEl('p', { text: 'These settings control the scheduling algorithm. Only change them if you know what you are doing.', cls: 'setting-item-description' }); new Setting(containerEl).setName('Reset FSRS Parameters').setDesc('Reset to FSRS defaults.').addButton(btn => btn.setButtonText('Reset').setWarning().onClick(async () => { this.plugin.settings.fsrsParams = generatorParameters(); await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); this.display(); })); new Setting(containerEl).setName('Request Retention').setDesc('The desired retention rate (0.7 to 0.99).').addText(text => text.setValue(this.plugin.settings.fsrsParams.request_retention.toString()).onChange(async (value) => { const num = parseFloat(value); if (!isNaN(num) && num > 0 && num < 1) { this.plugin.settings.fsrsParams.request_retention = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } })); new Setting(containerEl).setName('Maximum Interval').setDesc('The maximum number of days between reviews.').addText(text => text.setValue(this.plugin.settings.fsrsParams.maximum_interval.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num > 0) { this.plugin.settings.fsrsParams.maximum_interval = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } })); new Setting(containerEl).setName('FSRS Weights').setDesc('Comma-separated FSRS weights (17 values).').addTextArea(text => { text.setValue(this.plugin.settings.fsrsParams.w.join(', ')).onChange(async (value) => { try { const weights = value.split(',').map(v => parseFloat(v.trim())); if(weights.length === 17 && weights.every(w => !isNaN(w))) { this.plugin.settings.fsrsParams.w = weights; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } } catch (e) { console.error("Invalid FSRS weights format", e); } }); text.inputEl.rows = 5; text.inputEl.style.width = '100%'; }); }
+}
+
+// --- MAIN PLUGIN CLASS ---
+export default class FSRSFlashcardsPlugin extends Plugin {
+    settings: FSRSSettings; dataManager: DataManager;
+    async onload() { console.log('Loading FSRS Flashcards plugin'); await this.loadSettings(); this.dataManager = new DataManager(this); await this.dataManager.load(); this.addSettingTab(new FSRSSettingsTab(this.app, this)); this.registerView(VIEW_TYPE_DASHBOARD, (leaf) => new DashboardView(leaf, this)); this.addRibbonIcon(ICON_NAME, 'Open FSRS Decks', () => this.activateView()); this.addCommand({ id: 'add-fsrs-flashcard', name: 'FSRS: Add a new flashcard', editorCallback: (editor: Editor) => { const blockId = generateBlockId(); const template = `\n\n---card--- ^${blockId}\n\n---\n\n`; const cursor = editor.getCursor(); editor.replaceRange(template, cursor); editor.setCursor({ line: cursor.line + 3, ch: 0 }); } }); this.addCommand({ id: 'open-fsrs-dashboard', name: 'Open Decks Dashboard', callback: () => this.activateView() }); const debouncedRefresh = debounce(() => { this.dataManager.recalculateAllDeckStats(); this.refreshDashboardView(); }, 500, true); const updateAndRefresh = async (file: TFile) => { await this.dataManager.updateFile(file); debouncedRefresh(); }; this.registerEvent(this.app.vault.on('create', (file) => file instanceof TFile && updateAndRefresh(file))); this.registerEvent(this.app.vault.on('modify', (file) => file instanceof TFile && updateAndRefresh(file))); this.registerEvent(this.app.vault.on('delete', async (file) => { if (file instanceof TFile) { this.dataManager.removeDeck(this.dataManager['getDeckId'](file.path)); debouncedRefresh(); } })); this.registerEvent(this.app.vault.on('rename', async (file, oldPath) => { if (file instanceof TFile) { await this.dataManager.renameDeck(file, oldPath); debouncedRefresh(); } })); }
+    onunload() { this.app.workspace.detachLeavesOfType(VIEW_TYPE_DASHBOARD); }
+    async loadSettings() { const data: PluginData | null = await this.loadData(); this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings); this.settings.fsrsParams = Object.assign({}, DEFAULT_SETTINGS.fsrsParams, this.settings.fsrsParams); }
+    async saveSettings() { await this.dataManager.save(); }
+    async activateView() { const { workspace } = this.app; let leaf = workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD)[0]; if (leaf) { workspace.revealLeaf(leaf); return; } leaf = workspace.getRightLeaf(false) || workspace.getLeaf(true); await leaf.setViewState({ type: VIEW_TYPE_DASHBOARD, active: true }); workspace.revealLeaf(leaf); }
+    refreshDashboardView() { const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD)[0]; if (leaf?.view instanceof DashboardView) { (leaf.view as DashboardView).render(); } }
 }
