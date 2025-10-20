@@ -16,6 +16,7 @@ import {
 } from 'obsidian';
 import { FSRS, generatorParameters, Rating, State, Card as FSRSCard } from 'ts-fsrs';
 import * as CryptoJS from 'crypto-js';
+import { Chart, registerables } from 'chart.js';
 
 // --- CONSTANTS ---
 const VIEW_TYPE_DASHBOARD = 'fsrs-dashboard-view';
@@ -199,38 +200,80 @@ class ReviewModal extends Modal {
 
 // --- UI: STATS MODAL ---
 class StatsModal extends Modal {
-    private plugin: FSRSFlashcardsPlugin; constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app); this.plugin = plugin; }
+    private plugin: FSRSFlashcardsPlugin;
+    private chartInstances: Chart[] = [];
+
+    constructor(app: App, plugin: FSRSFlashcardsPlugin) {
+        super(app);
+        this.plugin = plugin;
+    }
+
     onOpen() {
-        this.contentEl.empty(); this.titleEl.setText("Statistics");
+        this.contentEl.empty();
+        this.titleEl.setText("Statistics");
+        Chart.register(...registerables);
+
         const stats = this.plugin.dataManager.getStats();
         new Setting(this.contentEl).setName("Reviews Today").setDesc(stats.reviewsToday.toString()).setHeading();
-        
+
+        // 30-Day Activity Chart
         this.contentEl.createEl('h3', { text: "30-Day Activity" });
-        const activityContainer = this.contentEl.createDiv({ attr: { style: 'font-family: monospace; white-space: pre; line-height: 1.2;'} });
-        const maxActivity = Math.max(...stats.activity, 1);
-        let activityHtml = '';
-        for (let i = 0; i < 30; i++) {
-            const barCount = Math.ceil((stats.activity[i] / maxActivity) * 10);
-            activityHtml += `|${'█'.repeat(barCount)}${' '.repeat(10 - barCount)}| ${stats.activity[i]}\n`;
-        }
-        activityContainer.setText(activityHtml);
+        const activityCanvas = this.contentEl.createEl('canvas');
+        const activityLabels = Array.from({ length: 30 }, (_, i) => {
+            const d = new Date();
+            d.setDate(d.getDate() - (29 - i));
+            return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        });
+        const activityChart = new Chart(activityCanvas, {
+            type: 'bar',
+            data: {
+                labels: activityLabels,
+                datasets: [{
+                    label: 'Reviews per Day',
+                    data: stats.activity,
+                    backgroundColor: 'rgba(75, 192, 192, 0.5)',
+                    borderColor: 'rgba(75, 192, 192, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        this.chartInstances.push(activityChart);
 
+        // 7-Day Forecast Chart
         new Setting(this.contentEl).setName("7-Day Forecast").setDesc(`${stats.forecast.reduce((a, b) => a + b, 0)} reviews due`).setHeading();
-        const forecastContainer = this.contentEl.createDiv({ attr: { style: 'display: flex; justify-content: space-around; text-align: center;'} });
-        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-        for (let i = 0; i < 7; i++) {
-            const dayWrapper = forecastContainer.createDiv();
-            const day = new Date(); day.setDate(day.getDate() + i);
-            dayWrapper.createDiv({ text: days[day.getDay()] });
-            dayWrapper.createDiv({ text: stats.forecast[i].toString(), attr: { style: 'font-size: 1.5em; font-weight: bold;'} });
-        }
+        const forecastCanvas = this.contentEl.createEl('canvas');
+        const forecastLabels = Array.from({ length: 7 }, (_, i) => {
+            const d = new Date();
+            d.setDate(d.getDate() + i);
+            return d.toLocaleDateString(undefined, { weekday: 'short' });
+        });
+        const forecastChart = new Chart(forecastCanvas, {
+            type: 'bar',
+            data: {
+                labels: forecastLabels,
+                datasets: [{
+                    label: 'Reviews Due',
+                    data: stats.forecast,
+                    backgroundColor: 'rgba(255, 159, 64, 0.5)',
+                    borderColor: 'rgba(255, 159, 64, 1)',
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+                plugins: { legend: { display: false } }
+            }
+        });
+        this.chartInstances.push(forecastChart);
+    }
 
-        new Setting(this.contentEl).setName("Card Maturity").setDesc(`${stats.maturity.mature + stats.maturity.young + stats.maturity.learning + stats.maturity.new} total cards`).setHeading();
-        const maturityContainer = this.contentEl.createDiv({ attr: { style: 'display: flex; flex-direction: column; gap: 5px;'} });
-        maturityContainer.createEl('p', { text: `Mature (interval > 21d): ${stats.maturity.mature}` });
-        maturityContainer.createEl('p', { text: `Young: ${stats.maturity.young}` });
-        maturityContainer.createEl('p', { text: `Learning: ${stats.maturity.learning}` });
-        maturityContainer.createEl('p', { text: `New: ${stats.maturity.new}` });
+    onClose() {
+        this.chartInstances.forEach(chart => chart.destroy());
+        this.contentEl.empty();
     }
 }
 
