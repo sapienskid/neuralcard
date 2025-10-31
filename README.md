@@ -1,19 +1,19 @@
-# NeuralCard - Flashcard Maker for Obsidian
+# NeuralCard - FSRS Flashcards for Obsidian
 
-Create Anki flashcards directly from your Obsidian notes using a hybrid TypeScript-Python architecture.
+Create and review flashcards directly in Obsidian using the Free Spaced Repetition Scheduler (FSRS) algorithm for optimal learning.
 
-> **Note**: Currently tested on Linux systems. May work on other platforms with adjustments.
+> **Note**: Currently tested on Linux systems. May work on other platforms.
 
 ## Features
 
-- **Multiple Card Types**: Basic, cloze, fill-in-the-blank, multiple-choice, true/false, and math cards
-- **Smart Parsing**: Automated processing of markdown notes for flashcard creation
-- **LaTeX Math Support**: Full mathematical notation support
-- **Code Syntax Highlighting**: Perfect for technical content
-- **Customizable Styles**: Multiple visual themes (Modern, Retro, Minimal)
-- **Media Integration**: Include images and media in cards
-- **Python Backend**: Robust card generation using genanki library
-- **Automatic Cleanup**: Smart temporary file management
+- **Spaced Repetition**: Uses FSRS algorithm for intelligent scheduling
+- **Multiple Card Types**: Basic cards and cloze deletion cards
+- **Dashboard View**: Overview of all decks with statistics
+- **Review Sessions**: Immersive review mode with keyboard shortcuts
+- **Custom Study**: Filter and study specific cards
+- **Statistics**: Charts for review activity and forecasts
+- **Markdown Support**: Full Obsidian markdown rendering in cards
+- **Chart.js Integration**: Visual statistics
 
 ## Installation
 
@@ -29,73 +29,67 @@ Create Anki flashcards directly from your Obsidian notes using a hybrid TypeScri
 2. Extract to `.obsidian/plugins/neuralcard-flashcards/`
 3. Reload Obsidian and enable the plugin
 
+### Development
+
+To develop the plugin:
+
+1. Clone the repository
+2. Run `npm install`
+3. Run `npm run dev` for development build
+4. Set `OBSIDIAN_VAULT_PATH` environment variable to your vault path
+5. Run `npm run build-deploy` to build and copy to vault
+6. Reload Obsidian to test changes
+
 ### Requirements
 
 - Obsidian v0.15.0+
-- Python 3.x
-- Internet connection for initial package installation
-
-The plugin auto-installs required Python packages (`genanki`, `markdown2`).
 
 ## Usage
 
-1. Configure settings (deck folder, default tags, card style)
-2. Use hotkeys to insert card templates:
-   - Basic: `flashcard-maker:insert-basic-card`
-   - Cloze: `flashcard-maker:insert-cloze-card`
-   - Fill-in-the-Blank: `flashcard-maker:insert-fill-in-blank-card`
-   - Multiple Choice: `flashcard-maker:insert-multiple-choice-card`
-   - True/False: `flashcard-maker:insert-true-false-card`
-   - Math: `flashcard-maker:insert-math-card`
-3. Click the NeuralCard ribbon icon to generate flashcards from your note
+1. Create a note and add the deck tag (default: `#flashcards`) to the frontmatter or as a tag.
+2. Add flashcards using the syntax below.
+3. Open the FSRS Decks dashboard from the ribbon icon or command palette.
+4. Study your decks!
 
 ## Card Syntax
 
-Use HTML comments in markdown:
+### Basic Cards
 
-```markdown
-<!-- Anki Card -->
-<!-- type: basic|cloze|multiple-choice|fill-in-the-blank|true-false|math -->
-<!-- front -->
-Question here
-<!-- back -->
-Answer here
-<!-- tags: tag1, tag2 -->
+```
+---card--- ^unique-id
+Front content here
+---
+Back content here
 ```
 
-See [Flashcard Format Guide](docs/flashcard_guide.md) for details.
+### Cloze Deletion Cards
+
+Use `==c1::hidden text==` for cloze deletions.
+
+Example:
+```
+This is a ==c1::cloze== deletion card.
+```
 
 ## Settings
 
-- **Deck Folder**: Output location for .apkg files
-- **Default Deck Name**: Name for new decks
-- **Default Tags**: Tags for all cards
-- **Card Style**: Visual theme selection
-- **Media Folder**: Media file location
-- **Keep Temporary Files**: For debugging
-- **Debug Mode**: Enable detailed logging
-- **Python Path**: Custom Python executable
+- **Deck Tag**: Tag to identify deck files
+- **Max New Cards per Day**: Limit for new cards
+- **Max Reviews per Day**: Limit for review cards
+- **Font Size**: Review card font size
+- **FSRS Parameters**: Advanced scheduling settings
 
-## Troubleshooting
+## Commands
 
-1. Enable Debug Mode and Keep Temporary Files
-2. Check `scripts/logs/` for errors
-3. Verify Python 3.x installation
-4. Ensure packages are installed: `pip install genanki markdown2`
+- `FSRS: Add a new flashcard`: Insert basic card template
+- `Open Decks Dashboard`: Open the dashboard view
 
 ## Technical Details
 
-- TypeScript frontend manages Obsidian integration
-- Python backend handles card parsing and Anki package generation
-- Temporary files managed automatically
-- Logs stored in `scripts/logs/`
-- This plugin is vibe coded
-
-## System Requirements
-
-- Obsidian v0.15.0+
-- Python 3.x
-- Linux (primary), Windows/macOS may require adjustments
+- Built with TypeScript for Obsidian
+- Uses ts-fsrs library for FSRS algorithm
+- Chart.js for statistics visualization
+- No external dependencies required
 
 ## Contributing
 
@@ -103,4 +97,4 @@ Contributions welcome at [GitHub](https://github.com/sapienskid/neuralcard).
 
 ## License
 
-OBSD License - see LICENSE file.
+MIT License - see LICENSE file.

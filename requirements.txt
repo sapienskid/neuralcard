@@ -1,3 +1,0 @@
-genanki
-markdown2
-pyyaml

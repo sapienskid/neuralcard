@@ -1,0 +1,162 @@
+{
+  "settings": {
+    "deckTag": "flashcards",
+    "newCardsPerDay": 20,
+    "reviewsPerDay": 200,
+    "fontSize": 18,
+    "fsrsParams": {
+      "request_retention": 0.9,
+      "maximum_interval": 36500,
+      "w": [
+        0.212,
+        1.2931,
+        2.3065,
+        8.2956,
+        6.4133,
+        0.8334,
+        3.0194,
+        0.001,
+        1.8722,
+        0.1666,
+        0.796,
+        1.4835,
+        0.0614,
+        0.2629,
+        1.6483,
+        0.6014,
+        1.8729,
+        0.5425,
+        0.0912,
+        0.0658,
+        0.1542
+      ],
+      "enable_fuzz": false,
+      "enable_short_term": true,
+      "learning_steps": [
+        "1m",
+        "10m"
+      ],
+      "relearning_steps": [
+        "10m"
+      ]
+    }
+  },
+  "cardData": {
+    "310e643880b23380437a95a6a58fca0ce6c7aa042a51f4072c2f2aa23e4cb017": {
+      "due": "2025-10-17T13:10:18.817Z",
+      "stability": 1.2931,
+      "difficulty": 5.11217071,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 1,
+      "last_review": "2025-10-17T13:04:18.817Z"
+    },
+    "28cab0bb1f6e6d8dc599d14325402b16989d05453c19868126c15c3343059b15": {
+      "due": "2025-10-17T14:15:51.098Z",
+      "stability": 2.3065,
+      "difficulty": 2.11810397,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 1,
+      "last_review": "2025-10-17T14:05:51.098Z"
+    },
+    "4804c6b4cecc7418ae15ee0d49f0e47f87d161b191a6264e45b7157a4755b7d7": {
+      "due": "2025-10-17T14:15:52.938Z",
+      "stability": 2.3065,
+      "difficulty": 2.11810397,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 1,
+      "last_review": "2025-10-17T14:05:52.938Z"
+    },
+    "fsrs-4hnv0o": {
+      "due": "2025-10-22T06:23:38.971Z",
+      "stability": 0.40255,
+      "difficulty": 7.1949,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 0,
+      "last_review": "2025-10-22T06:22:38.971Z"
+    },
+    "fsrs-ecj0ki": {
+      "due": "2025-10-22T06:27:39.852Z",
+      "stability": 1.18385,
+      "difficulty": 6.48830527,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 0,
+      "last_review": "2025-10-22T06:22:39.852Z"
+    },
+    "fsrs-ljhyj9": {
+      "due": "2025-11-07T06:22:40.547Z",
+      "stability": 15.69105,
+      "difficulty": 3.22450159,
+      "elapsed_days": 0,
+      "scheduled_days": 16,
+      "reps": 1,
+      "lapses": 0,
+      "state": 2,
+      "learning_steps": 0,
+      "last_review": "2025-10-22T06:22:40.547Z"
+    },
+    "fsrs-39fy0y": {
+      "due": "2025-10-22T06:32:48.340Z",
+      "stability": 3.173,
+      "difficulty": 5.28243442,
+      "elapsed_days": 0,
+      "scheduled_days": 0,
+      "reps": 1,
+      "lapses": 0,
+      "state": 1,
+      "learning_steps": 0,
+      "last_review": "2025-10-22T06:22:48.340Z"
+    }
+  },
+  "reviewHistory": [
+    {
+      "cardId": "28cab0bb1f6e6d8dc599d14325402b16989d05453c19868126c15c3343059b15",
+      "timestamp": 1760709951098,
+      "rating": 3
+    },
+    {
+      "cardId": "4804c6b4cecc7418ae15ee0d49f0e47f87d161b191a6264e45b7157a4755b7d7",
+      "timestamp": 1760709952938,
+      "rating": 3
+    },
+    {
+      "cardId": "fsrs-4hnv0o",
+      "timestamp": 1761114158971,
+      "rating": 1
+    },
+    {
+      "cardId": "fsrs-ecj0ki",
+      "timestamp": 1761114159852,
+      "rating": 2
+    },
+    {
+      "cardId": "fsrs-ljhyj9",
+      "timestamp": 1761114160547,
+      "rating": 4
+    },
+    {
+      "cardId": "fsrs-39fy0y",
+      "timestamp": 1761114168340,
+      "rating": 3
+    }
+  ]
+}
