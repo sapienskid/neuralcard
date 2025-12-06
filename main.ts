@@ -17,6 +17,8 @@ import {
 import { FSRS, generatorParameters, Rating, State, Card as FSRSCard } from 'ts-fsrs';
 import * as CryptoJS from 'crypto-js';
 import { Chart, registerables } from 'chart.js';
+import { PouchDBManager } from './src/database/PouchDBManager';
+import { DataMigration } from './src/database/DataMigration';
 
 // --- CONSTANTS ---
 const VIEW_TYPE_DASHBOARD = 'fsrs-dashboard-view';
@@ -35,8 +37,33 @@ function generateBlockId(length: number = 6): string {
 // --- DATA INTERFACES ---
 
 interface FSRSParameters { request_retention: number; maximum_interval: number; w: readonly number[]; }
-interface FSRSSettings { deckTag: string; newCardsPerDay: number; reviewsPerDay: number; fontSize: number; fsrsParams: FSRSParameters; }
-const DEFAULT_SETTINGS: FSRSSettings = { deckTag: 'flashcards', newCardsPerDay: 20, reviewsPerDay: 200, fontSize: 18, fsrsParams: generatorParameters() };
+interface FSRSSettings { 
+    deckTag: string; 
+    newCardsPerDay: number; 
+    reviewsPerDay: number; 
+    fontSize: number; 
+    fsrsParams: FSRSParameters;
+    // Sync settings
+    syncEnabled: boolean;
+    syncUrl: string;
+    syncDbName: string;
+    syncUsername: string;
+    syncPassword: string;
+    usePouchDB: boolean;
+}
+const DEFAULT_SETTINGS: FSRSSettings = { 
+    deckTag: 'flashcards', 
+    newCardsPerDay: 20, 
+    reviewsPerDay: 200, 
+    fontSize: 18, 
+    fsrsParams: generatorParameters(),
+    syncEnabled: false,
+    syncUrl: '',
+    syncDbName: 'neuralcard',
+    syncUsername: '',
+    syncPassword: '',
+    usePouchDB: true
+};
 
 type CardType = 'basic' | 'cloze';
 interface CardData { id: string; deckId: string; filePath: string; type: CardType; originalText: string; front: string; back: string; }
@@ -55,17 +82,164 @@ class DataManager {
     private cards: Map<string, Card> = new Map();
     private fsrsDataStore: Record<string, FSRSData> = {};
     private reviewHistory: ReviewLog[] = [];
+    private pouchDB: PouchDBManager | null = null;
+    private migrationCompleted: boolean = false;
 
-    constructor(plugin: FSRSFlashcardsPlugin) { this.plugin = plugin; this.fsrs = new FSRS(plugin.settings.fsrsParams); }
+    constructor(plugin: FSRSFlashcardsPlugin) { 
+        this.plugin = plugin; 
+        this.fsrs = new FSRS(plugin.settings.fsrsParams);
+        if (plugin.settings.usePouchDB) {
+            this.pouchDB = new PouchDBManager('neuralcard_local');
+        }
+    }
+
+    getPouchDB(): PouchDBManager | null {
+        return this.pouchDB;
+    }
+    
+    async initializeSync() {
+        if (this.plugin.settings.syncEnabled && 
+            this.plugin.settings.syncUrl && 
+            this.pouchDB) {
+            try {
+                // Build authenticated URL if credentials are provided
+                const syncUrl = this.buildAuthenticatedUrl(
+                    this.plugin.settings.syncUrl,
+                    this.plugin.settings.syncDbName,
+                    this.plugin.settings.syncUsername,
+                    this.plugin.settings.syncPassword
+                );
+                console.log('Initializing sync with:', this.sanitizeUrl(syncUrl));
+                
+                // Setup sync event handlers
+                this.pouchDB.onSyncChange((info) => {
+                    console.log('Synced changes:', info);
+                    if (info.change.docs_written > 0) {
+                        new Notice(`Synced ${info.change.docs_written} changes`, 2000);
+                    }
+                });
+                
+                this.pouchDB.onSyncError((err) => {
+                    console.error('Sync error:', err);
+                    new Notice(`Sync error: ${err.message}`, 5000);
+                });
+                
+                this.pouchDB.onSyncActive(() => {
+                    console.log('Sync active');
+                });
+                
+                this.pouchDB.onSyncPaused((err) => {
+                    if (err) {
+                        console.warn('Sync paused with error:', err);
+                    }
+                });
+                
+                await this.pouchDB.setupSync(syncUrl);
+                new Notice('Sync initialized successfully');
+            } catch (error) {
+                console.error('Failed to initialize sync:', error);
+                new Notice(`Sync initialization failed: ${error.message}`);
+            }
+        }
+    }
+    
+    private buildAuthenticatedUrl(url: string, dbName: string, username: string, password: string): string {
+        try {
+            // Ensure URL ends with /
+            if (!url.endsWith('/')) {
+                url += '/';
+            }
+            
+            const urlObj = new URL(url);
+            
+            // Append database name
+            // Remove leading slash from dbName if present to avoid double slashes
+            const cleanDbName = dbName.startsWith('/') ? dbName.substring(1) : dbName;
+            
+            // If pathname is just /, replace it. If it has a path, append to it.
+            if (urlObj.pathname === '/' || urlObj.pathname === '') {
+                 urlObj.pathname = '/' + cleanDbName;
+            } else if (!urlObj.pathname.endsWith('/' + cleanDbName)) {
+                 // Avoid appending if already present
+                 if (urlObj.pathname.endsWith('/')) {
+                     urlObj.pathname += cleanDbName;
+                 } else {
+                     urlObj.pathname += '/' + cleanDbName;
+                 }
+            }
+            
+            if (username && password) {
+                urlObj.username = encodeURIComponent(username);
+                urlObj.password = encodeURIComponent(password);
+            }
+            
+            return urlObj.toString();
+        } catch (error) {
+            console.error('Failed to build authenticated URL:', error);
+            return url;
+        }
+    }
+    
+    private sanitizeUrl(url: string): string {
+        try {
+            const urlObj = new URL(url);
+            if (urlObj.password) {
+                urlObj.password = '***';
+            }
+            return urlObj.toString();
+        } catch (error) {
+            return url;
+        }
+    }
+    
+    async stopSync() {
+        if (this.pouchDB) {
+            await this.pouchDB.stopSync();
+        }
+    }
     async load() {
-        const data: PluginData | null = await this.plugin.loadData();
-        const cardData = data?.cardData || {};
-        for (const cardId in cardData) { const card = cardData[cardId]; if (card.due) card.due = new Date(card.due); if (card.last_review) card.last_review = new Date(card.last_review); }
-        this.fsrsDataStore = cardData;
-        this.reviewHistory = data?.reviewHistory || [];
+        if (this.plugin.settings.usePouchDB && this.pouchDB) {
+            await this.loadFromPouchDB();
+        } else {
+            await this.loadFromLegacyJSON();
+        }
         await this.buildIndex();
     }
-    async save() { await this.plugin.saveData({ settings: this.plugin.settings, cardData: this.fsrsDataStore, reviewHistory: this.reviewHistory }); }
+
+    private async loadFromPouchDB() {
+        if (!this.pouchDB) return;
+        
+        console.log('Loading data from PouchDB...');
+        
+        // Load card states
+        this.fsrsDataStore = await this.pouchDB.getAllCardStates();
+        
+        // Load review history
+        this.reviewHistory = await this.pouchDB.getReviewHistory();
+        
+        console.log(`Loaded ${Object.keys(this.fsrsDataStore).length} cards and ${this.reviewHistory.length} reviews from PouchDB`);
+    }
+
+    private async loadFromLegacyJSON() {
+        console.log('Loading data from legacy JSON...');
+        const data: PluginData | null = await this.plugin.loadData();
+        const cardData = data?.cardData || {};
+        for (const cardId in cardData) { 
+            const card = cardData[cardId]; 
+            if (card.due) card.due = new Date(card.due); 
+            if (card.last_review) card.last_review = new Date(card.last_review); 
+        }
+        this.fsrsDataStore = cardData;
+        this.reviewHistory = data?.reviewHistory || [];
+    }
+    async save() { 
+        // Always save settings to data.json
+        await this.plugin.saveData({ 
+            settings: this.plugin.settings, 
+            cardData: this.plugin.settings.usePouchDB ? {} : this.fsrsDataStore,
+            reviewHistory: this.plugin.settings.usePouchDB ? [] : this.reviewHistory
+        });
+    }
     updateFsrsParameters(params: FSRSParameters) { this.fsrs = new FSRS(params); }
     async buildIndex() {
         console.log("FSRS: Building index...");
@@ -164,7 +338,29 @@ class DataManager {
     }
     getReviewQueue(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards.slice(0, this.plugin.settings.reviewsPerDay), ...newCards.slice(0, this.plugin.settings.newCardsPerDay)]; }
     getAllCardsForStudy(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards, ...newCards]; }
-    updateCard(card: Card, rating: Rating) { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const newFsrsData = scheduling_cards[rating as Exclude<Rating, Rating.Manual>].card; this.fsrsDataStore[card.id] = newFsrsData; card.fsrsData = newFsrsData; this.reviewHistory.push({ cardId: card.id, timestamp: now.getTime(), rating }); this.save(); }
+    updateCard(card: Card, rating: Rating) { 
+        const now = new Date(); 
+        const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; 
+        const scheduling_cards = this.fsrs.repeat(fsrsCard, now); 
+        const newFsrsData = scheduling_cards[rating as Exclude<Rating, Rating.Manual>].card; 
+        this.fsrsDataStore[card.id] = newFsrsData; 
+        card.fsrsData = newFsrsData; 
+        
+        const reviewLog = { cardId: card.id, timestamp: now.getTime(), rating };
+        this.reviewHistory.push(reviewLog);
+        
+        // Save immediately to PouchDB if enabled
+        if (this.plugin.settings.usePouchDB && this.pouchDB) {
+            this.pouchDB.saveCardState(card.id, card.deckId, card.filePath, newFsrsData).catch(err => 
+                console.error('Failed to save card state:', err)
+            );
+            this.pouchDB.addReviewLog(card.id, now.getTime(), rating).catch(err => 
+                console.error('Failed to save review log:', err)
+            );
+        } else {
+            this.save();
+        }
+    }
     getNextReviewIntervals(card: Card): Record<Exclude<Rating, Rating.Manual>, string> { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const formatInterval = (days: number): string => { if (days < 1) return "<1d"; if (days < 30) return `${Math.round(days)}d`; if (days < 365) return `${(days / 30).toFixed(1)}m`; return `${(days / 365).toFixed(1)}y`; }; return { [Rating.Again]: formatInterval(scheduling_cards[Rating.Again].card.scheduled_days), [Rating.Hard]: formatInterval(scheduling_cards[Rating.Hard].card.scheduled_days), [Rating.Good]: formatInterval(scheduling_cards[Rating.Good].card.scheduled_days), [Rating.Easy]: formatInterval(scheduling_cards[Rating.Easy].card.scheduled_days), }; }
     getStats() { const now = new Date(); const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const reviewsToday = this.reviewHistory.filter(log => log.timestamp >= todayStart); const activity = new Array(30).fill(0); this.reviewHistory.forEach(log => { const daysAgo = Math.floor((now.getTime() - log.timestamp) / (1000 * 60 * 60 * 24)); if (daysAgo < 30) activity[29 - daysAgo]++; }); const forecast = new Array(7).fill(0); let mature = 0, learning = 0, young = 0, total = 0; for (const card of this.cards.values()) { const data = this.fsrsDataStore[card.id]; if (data) { total++; if (data.due <= now) { const daysForward = Math.floor((data.due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)); if (daysForward < 7 && daysForward >= 0) forecast[daysForward]++; } if (data.stability >= 21) mature++; else if (data.state === State.Review) young++; else learning++; } } return { reviewsToday: reviewsToday.length, activity, forecast, maturity: { mature, young, learning, new: this.cards.size - total } }; }
 }
@@ -179,6 +375,49 @@ class DashboardView extends ItemView {
         const headerEl = this.contentEl.createDiv(); const setting = new Setting(headerEl).setName("Flashcard Decks").setHeading();
         setting.addExtraButton(btn => btn.setIcon('bar-chart-3').setTooltip('View Statistics').onClick(() => new StatsModal(this.app, this.plugin).open()));
         setting.addExtraButton(btn => btn.setIcon('filter').setTooltip('Custom Study Session').onClick(() => new CustomStudyModal(this.app, this.plugin).open()));
+        
+        // Manual sync button
+        const pouchDB = this.plugin.dataManager.getPouchDB();
+        if (this.plugin.settings.syncEnabled && pouchDB) {
+            setting.addExtraButton(btn => {
+                btn.setIcon('refresh-ccw')
+                    .setTooltip('Manual Sync')
+                    .onClick(async () => {
+                        // Check if sync is already in progress
+                        if (pouchDB.isSyncing()) {
+                            new Notice('Sync already in progress...');
+                            return;
+                        }
+                        
+                        try {
+                            btn.setDisabled(true);
+                            btn.setIcon('loader');
+                            
+                            const notice = new Notice('Syncing...', 0);
+                            
+                            // Track sync progress
+                            let docsWritten = 0;
+                            pouchDB.onSyncChange((info) => {
+                                docsWritten += info.change.docs_written;
+                                notice.setMessage(`Syncing... (${docsWritten} changes)`);
+                            });
+                            
+                            await pouchDB.manualSync();
+                            
+                            notice.hide();
+                            const status = await pouchDB.getSyncStatus();
+                            new Notice(`Sync completed! Last: ${status.lastSyncTime ? new Date(status.lastSyncTime).toLocaleString() : 'Now'}`, 3000);
+                            
+                        } catch (error) {
+                            new Notice(`Sync failed: ${error.message}`, 5000);
+                        } finally {
+                            btn.setDisabled(false);
+                            btn.setIcon('refresh-ccw');
+                        }
+                    });
+            });
+        }
+        
         setting.addExtraButton(btn => btn.setIcon('refresh-cw').setTooltip('Refresh decks from vault').onClick(async () => { new Notice('Refreshing decks...'); await this.plugin.dataManager.buildIndex(); this.render(); new Notice('Decks refreshed!'); }));
         const decks = this.plugin.dataManager.getDecks(); const globalStats = decks.reduce((acc, deck) => { acc.new += deck.stats.new; acc.due += deck.stats.due; acc.total += deck.cardIds.size; return acc; }, { new: 0, due: 0, total: 0 });
         const statsContainer = this.contentEl.createDiv({ cls: 'fsrs-global-stats' }); statsContainer.createEl('p', { text: `Total Cards: ${globalStats.total}` }); statsContainer.createEl('p', { text: `Due: ` }).createEl('span', { text: `${globalStats.due}`, attr: { style: 'color: var(--color-red); font-weight: bold;' } }); statsContainer.createEl('p', { text: `New: ` }).createEl('span', { text: `${globalStats.new}`, attr: { style: 'color: var(--color-blue); font-weight: bold;' } });
@@ -618,7 +857,241 @@ class CustomStudyModal extends Modal {
 // --- UI: SETTINGS TAB ---
 class FSRSSettingsTab extends PluginSettingTab {
     plugin: FSRSFlashcardsPlugin; constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app, plugin); this.plugin = plugin; }
-    display(): void { const { containerEl } = this; containerEl.empty(); containerEl.createEl('h1', { text: 'FSRS Flashcards Settings' }); new Setting(containerEl).setName('Deck Tag').setDesc('The tag to identify deck files (e.g., "flashcards" for #flashcards).').addText(text => text.setPlaceholder('flashcards').setValue(this.plugin.settings.deckTag).onChange(async (value) => { this.plugin.settings.deckTag = value.trim(); await this.plugin.saveSettings(); await this.plugin.dataManager.buildIndex(); this.plugin.refreshDashboardView(); })); containerEl.createEl('h2', { text: 'Global Review Settings' }); new Setting(containerEl).setName('Max new cards per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.newCardsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.newCardsPerDay = num; await this.plugin.saveSettings(); } })); new Setting(containerEl).setName('Max reviews per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.reviewsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.reviewsPerDay = num; await this.plugin.saveSettings(); } })); containerEl.createEl('h2', { text: 'Appearance' }); new Setting(containerEl).setName('Review font size').addSlider(slider => slider.setLimits(12, 32, 1).setValue(this.plugin.settings.fontSize).setDynamicTooltip().onChange(async (value) => { this.plugin.settings.fontSize = value; await this.plugin.saveSettings(); })); containerEl.createEl('h2', { text: 'FSRS Parameters' }); containerEl.createEl('p', { text: 'These settings control the scheduling algorithm. Only change them if you know what you are doing.', cls: 'setting-item-description' }); new Setting(containerEl).setName('Reset FSRS Parameters').setDesc('Reset to FSRS defaults.').addButton(btn => btn.setButtonText('Reset').setWarning().onClick(async () => { this.plugin.settings.fsrsParams = generatorParameters(); await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); this.display(); })); new Setting(containerEl).setName('Request Retention').setDesc('The desired retention rate (0.7 to 0.99).').addText(text => text.setValue(this.plugin.settings.fsrsParams.request_retention.toString()).onChange(async (value) => { const num = parseFloat(value); if (!isNaN(num) && num > 0 && num < 1) { this.plugin.settings.fsrsParams.request_retention = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } })); new Setting(containerEl).setName('Maximum Interval').setDesc('The maximum number of days between reviews.').addText(text => text.setValue(this.plugin.settings.fsrsParams.maximum_interval.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num > 0) { this.plugin.settings.fsrsParams.maximum_interval = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } })); new Setting(containerEl).setName('FSRS Weights').setDesc('Comma-separated FSRS weights (17 values).').addTextArea(text => { text.setValue(this.plugin.settings.fsrsParams.w.join(', ')).onChange(async (value) => { try { const weights = value.split(',').map(v => parseFloat(v.trim())); if (weights.length === 17 && weights.every(w => !isNaN(w))) { this.plugin.settings.fsrsParams.w = weights; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } } catch (e) { console.error("Invalid FSRS weights format", e); } }); text.inputEl.rows = 5; text.inputEl.style.width = '100%'; }); }
+    display(): void { 
+        const { containerEl } = this; 
+        containerEl.empty(); 
+        containerEl.createEl('h1', { text: 'FSRS Flashcards Settings' }); 
+        
+        // Database Settings
+        containerEl.createEl('h2', { text: 'Database Settings' });
+        
+        new Setting(containerEl)
+            .setName('Use PouchDB (IndexedDB)')
+            .setDesc('Use PouchDB for local storage instead of JSON files. Better performance for large collections (10k+ cards).')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.usePouchDB)
+                .onChange(async (value) => {
+                    this.plugin.settings.usePouchDB = value;
+                    await this.plugin.saveSettings();
+                    new Notice('Please reload Obsidian for this change to take effect');
+                }));
+        
+        new Setting(containerEl)
+            .setName('Migrate to PouchDB')
+            .setDesc('Convert your existing data.json to PouchDB format. (Requires PouchDB to be enabled)')
+            .setDisabled(!this.plugin.settings.usePouchDB)
+            .addButton(btn => btn
+                .setButtonText('Migrate Now')
+                .setCta()
+                .onClick(async () => {
+                    await this.migrateData();
+                }));
+        
+        // Sync Settings
+        containerEl.createEl('h2', { text: 'Sync Settings' });
+        
+        new Setting(containerEl)
+            .setName('Enable Sync')
+            .setDesc('Sync your flashcard data with a CouchDB server')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.syncEnabled)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncEnabled = value;
+                    await this.plugin.saveSettings();
+                    
+                    if (value && this.plugin.dataManager['pouchDB']) {
+                        await this.setupSync();
+                    } else if (!value && this.plugin.dataManager['pouchDB']) {
+                        await this.plugin.dataManager['pouchDB'].stopSync();
+                        new Notice('Sync disabled');
+                    }
+                }));
+        
+        new Setting(containerEl)
+            .setName('CouchDB Server URL')
+            .setDesc('Your CouchDB server URL (e.g., https://your-server.com:5984/neuralcard)')
+            .addText(text => text
+                .setPlaceholder('https://your-server.com:5984/neuralcard')
+                .setValue(this.plugin.settings.syncUrl)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncUrl = value.trim();
+                    await this.plugin.saveSettings();
+                }));
+        
+        new Setting(containerEl)
+            .setName('Database Name')
+            .setDesc('The name of the database on your CouchDB server')
+            .addText(text => text
+                .setPlaceholder('neuralcard')
+                .setValue(this.plugin.settings.syncDbName)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncDbName = value.trim() || 'neuralcard';
+                    await this.plugin.saveSettings();
+                }));
+        
+        new Setting(containerEl)
+            .setName('Username')
+            .setDesc('CouchDB username for authentication')
+            .addText(text => text
+                .setPlaceholder('admin')
+                .setValue(this.plugin.settings.syncUsername)
+                .onChange(async (value) => {
+                    this.plugin.settings.syncUsername = value;
+                    await this.plugin.saveSettings();
+                }));
+        
+        new Setting(containerEl)
+            .setName('Password')
+            .setDesc('CouchDB password (stored securely)')
+            .addText(text => {
+                text.setPlaceholder('Enter password')
+                    .setValue(this.plugin.settings.syncPassword)
+                    .onChange(async (value) => {
+                        this.plugin.settings.syncPassword = value;
+                        await this.plugin.saveSettings();
+                    });
+                text.inputEl.type = 'password';
+                return text;
+            });
+        
+        if (this.plugin.settings.syncEnabled && this.plugin.dataManager['pouchDB']) {
+            new Setting(containerEl)
+                .setName('Sync Status')
+                .setDesc('Check your current sync status')
+                .addButton(btn => btn
+                    .setButtonText('Check Status')
+                    .onClick(async () => {
+                        const pouchDB = this.plugin.dataManager['pouchDB'];
+                        if (pouchDB) {
+                            const status = await pouchDB.getSyncStatus();
+                            const info = await pouchDB.getDatabaseInfo();
+                            new Notice(`Sync: ${status.enabled ? 'Active' : 'Inactive'}\nDocs: ${info.doc_count}\nLast Sync: ${status.lastSyncTime || 'Never'}`, 10000);
+                        }
+                    }));
+        }
+        
+        new Setting(containerEl).setName('Deck Tag').setDesc('The tag to identify deck files (e.g., "flashcards" for #flashcards).').addText(text => text.setPlaceholder('flashcards').setValue(this.plugin.settings.deckTag).onChange(async (value) => { this.plugin.settings.deckTag = value.trim(); await this.plugin.saveSettings(); await this.plugin.dataManager.buildIndex(); this.plugin.refreshDashboardView(); })); 
+        containerEl.createEl('h2', { text: 'Global Review Settings' }); new Setting(containerEl).setName('Max new cards per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.newCardsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.newCardsPerDay = num; await this.plugin.saveSettings(); } })); new Setting(containerEl).setName('Max reviews per day').setDesc("Applies to all decks.").addText(text => text.setValue(this.plugin.settings.reviewsPerDay.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num >= 0) { this.plugin.settings.reviewsPerDay = num; await this.plugin.saveSettings(); } })); containerEl.createEl('h2', { text: 'Appearance' }); new Setting(containerEl).setName('Review font size').addSlider(slider => slider.setLimits(12, 32, 1).setValue(this.plugin.settings.fontSize).setDynamicTooltip().onChange(async (value) => { this.plugin.settings.fontSize = value; await this.plugin.saveSettings(); })); containerEl.createEl('h2', { text: 'FSRS Parameters' }); containerEl.createEl('p', { text: 'These settings control the scheduling algorithm. Only change them if you know what you are doing.', cls: 'setting-item-description' }); new Setting(containerEl).setName('Reset FSRS Parameters').setDesc('Reset to FSRS defaults.').addButton(btn => btn.setButtonText('Reset').setWarning().onClick(async () => { this.plugin.settings.fsrsParams = generatorParameters(); await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); this.display(); })); new Setting(containerEl).setName('Request Retention').setDesc('The desired retention rate (0.7 to 0.99).').addText(text => text.setValue(this.plugin.settings.fsrsParams.request_retention.toString()).onChange(async (value) => { const num = parseFloat(value); if (!isNaN(num) && num > 0 && num < 1) { this.plugin.settings.fsrsParams.request_retention = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } })); new Setting(containerEl).setName('Maximum Interval').setDesc('The maximum number of days between reviews.').addText(text => text.setValue(this.plugin.settings.fsrsParams.maximum_interval.toString()).onChange(async (value) => { const num = parseInt(value, 10); if (!isNaN(num) && num > 0) { this.plugin.settings.fsrsParams.maximum_interval = num; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } }));         new Setting(containerEl).setName('FSRS Weights').setDesc('Comma-separated FSRS weights (17 values).').addTextArea(text => { text.setValue(this.plugin.settings.fsrsParams.w.join(', ')).onChange(async (value) => { try { const weights = value.split(',').map(v => parseFloat(v.trim())); if (weights.length === 17 && weights.every(w => !isNaN(w))) { this.plugin.settings.fsrsParams.w = weights; await this.plugin.saveSettings(); this.plugin.dataManager.updateFsrsParameters(this.plugin.settings.fsrsParams); } } catch (e) { console.error("Invalid FSRS weights format", e); } }); text.inputEl.rows = 5; text.inputEl.style.width = '100%'; }); }
+    
+    async migrateData() {
+        const pouchDB = this.plugin.dataManager['pouchDB'];
+        if (!pouchDB) {
+            new Notice('PouchDB is not enabled');
+            return;
+        }
+        
+        try {
+            new Notice('Starting migration... This may take a while for large collections.');
+            
+            // Load legacy data
+            const legacyData = await this.plugin.loadData();
+            if (!legacyData) {
+                new Notice('No legacy data found to migrate');
+                return;
+            }
+            
+            // Build deck mapping
+            const deckMapping: Record<string, { deckId: string; filePath: string }> = {};
+            for (const card of this.plugin.dataManager.getAllCards()) {
+                deckMapping[card.id] = {
+                    deckId: card.deckId,
+                    filePath: card.filePath
+                };
+            }
+            
+            // Perform migration
+            const migration = new DataMigration(pouchDB);
+            await migration.migrateFromLegacy(legacyData, deckMapping);
+            
+            // Verify migration
+            const verification = await migration.verifyMigration(legacyData);
+            
+            if (verification.success) {
+                new Notice(`Migration successful! Migrated ${verification.stats.migratedCards} cards and ${verification.stats.migratedLogs} reviews.`);
+                this.plugin.settings.usePouchDB = true;
+                await this.plugin.saveSettings();
+                this.display();
+            } else {
+                new Notice(`Migration completed with errors: ${verification.errors.join(', ')}`, 10000);
+            }
+            
+        } catch (error) {
+            console.error('Migration failed:', error);
+            new Notice(`Migration failed: ${error.message}`);
+        }
+    }
+    
+    async setupSync() {
+        const pouchDB = this.plugin.dataManager['pouchDB'];
+        if (!pouchDB) {
+            new Notice('PouchDB is not enabled');
+            return;
+        }
+        
+        if (!this.plugin.settings.syncUrl) {
+            new Notice('Please enter a CouchDB server URL first');
+            return;
+        }
+        
+        if (!this.plugin.settings.syncUsername || !this.plugin.settings.syncPassword) {
+            new Notice('Please enter both username and password');
+            return;
+        }
+        
+        try {
+            new Notice('Setting up sync...');
+            const syncUrl = this.buildAuthenticatedUrl(
+                this.plugin.settings.syncUrl,
+                this.plugin.settings.syncDbName,
+                this.plugin.settings.syncUsername,
+                this.plugin.settings.syncPassword
+            );
+            await pouchDB.setupSync(syncUrl);
+            new Notice('Sync enabled successfully!');
+        } catch (error) {
+            console.error('Sync setup failed:', error);
+            new Notice(`Sync setup failed: ${error.message}`);
+            this.plugin.settings.syncEnabled = false;
+            await this.plugin.saveSettings();
+        }
+    }
+    
+    private buildAuthenticatedUrl(url: string, dbName: string, username: string, password: string): string {
+        try {
+            // Ensure URL ends with /
+            if (!url.endsWith('/')) {
+                url += '/';
+            }
+            
+            const urlObj = new URL(url);
+            
+            // Append database name
+            // Remove leading slash from dbName if present to avoid double slashes
+            const cleanDbName = dbName.startsWith('/') ? dbName.substring(1) : dbName;
+            
+            // If pathname is just /, replace it. If it has a path, append to it.
+            if (urlObj.pathname === '/' || urlObj.pathname === '') {
+                 urlObj.pathname = '/' + cleanDbName;
+            } else if (!urlObj.pathname.endsWith('/' + cleanDbName)) {
+                 // Avoid appending if already present
+                 if (urlObj.pathname.endsWith('/')) {
+                     urlObj.pathname += cleanDbName;
+                 } else {
+                     urlObj.pathname += '/' + cleanDbName;
+                 }
+            }
+            
+            if (username && password) {
+                urlObj.username = encodeURIComponent(username);
+                urlObj.password = encodeURIComponent(password);
+            }
+            
+            return urlObj.toString();
+        } catch (error) {
+            console.error('Failed to build authenticated URL:', error);
+            return url;
+        }
+    }
 }
 
 // --- MAIN PLUGIN CLASS ---
@@ -630,19 +1103,63 @@ export default class FSRSFlashcardsPlugin extends Plugin {
         await this.loadSettings();
         this.dataManager = new DataManager(this);
         await this.dataManager.load();
+        
+        // Initialize sync if enabled
+        await this.dataManager.initializeSync();
+        
         this.addSettingTab(new FSRSSettingsTab(this.app, this));
         this.registerView(VIEW_TYPE_DASHBOARD, (leaf) => new DashboardView(leaf, this));
-        this.addRibbonIcon(ICON_NAME, 'Open FSRS Decks', () => this.activateView());
         this.addCommand({ id: 'add-fsrs-flashcard', name: 'FSRS: Add a new flashcard', editorCallback: (editor: Editor) => { const blockId = generateBlockId(); const template = `\n\n---card--- ^${blockId}\n\n---\n\n`; const cursor = editor.getCursor(); editor.replaceRange(template, cursor); editor.setCursor({ line: cursor.line + 3, ch: 0 }); } });
         this.addCommand({ id: 'open-fsrs-dashboard', name: 'Open Decks Dashboard', callback: () => this.activateView() });
+        
+        // Add sync commands
+        if (this.settings.usePouchDB) {
+            this.addCommand({
+                id: 'sync-now',
+                name: 'Sync Now',
+                callback: async () => {
+                    if (!this.settings.syncEnabled) {
+                        new Notice('Sync is not enabled. Enable it in settings.');
+                        return;
+                    }
+                    if (!this.settings.syncUrl) {
+                        new Notice('Sync URL not configured. Set it in settings.');
+                        return;
+                    }
+                    new Notice('Syncing...');
+                    await this.dataManager.initializeSync();
+                }
+            });
+            
+            this.addCommand({
+                id: 'check-sync-status',
+                name: 'Check Sync Status',
+                callback: async () => {
+                    const pouchDB = this.dataManager.getPouchDB();
+                    if (!pouchDB) {
+                        new Notice('PouchDB is not enabled');
+                        return;
+                    }
+                    const status = await pouchDB.getSyncStatus();
+                    const info = await pouchDB.getDatabaseInfo();
+                    new Notice(`Sync Status:\n${status.enabled ? '✓ Active' : '✗ Inactive'}\nURL: ${status.remoteUrl || 'Not set'}\nDocuments: ${info.doc_count}\nLast Sync: ${status.lastSyncTime ? new Date(status.lastSyncTime).toLocaleString() : 'Never'}`, 10000);
+                }
+            });
+        }
+        
         const debouncedRefresh = debounce(() => { this.dataManager.recalculateAllDeckStats(); this.refreshDashboardView(); }, 500, true);
         const updateAndRefresh = async (file: TFile) => { await this.dataManager.updateFile(file); debouncedRefresh(); };
         this.registerEvent(this.app.vault.on('create', (file) => file instanceof TFile && updateAndRefresh(file)));
         this.registerEvent(this.app.vault.on('modify', (file) => file instanceof TFile && updateAndRefresh(file)));
         this.registerEvent(this.app.vault.on('delete', async (file) => { if (file instanceof TFile) { this.dataManager.removeDeck(this.dataManager['getDeckId'](file.path)); debouncedRefresh(); } }));
         this.registerEvent(this.app.vault.on('rename', async (file, oldPath) => { if (file instanceof TFile) { await this.dataManager.renameDeck(file, oldPath); debouncedRefresh(); } }));
+        
+        // Refresh dashboard view to ensure sync button appears if enabled
+        this.refreshDashboardView();
     }
-    onunload() {
+    async onunload() {
+        // Stop sync gracefully
+        await this.dataManager.stopSync();
         this.app.workspace.detachLeavesOfType(VIEW_TYPE_DASHBOARD);
         this.removeStyle();
     }
@@ -687,7 +1204,15 @@ export default class FSRSFlashcardsPlugin extends Plugin {
         }
     }
     async loadSettings() { const data: PluginData | null = await this.loadData(); this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings); this.settings.fsrsParams = Object.assign({}, DEFAULT_SETTINGS.fsrsParams, this.settings.fsrsParams); }
-    async saveSettings() { await this.dataManager.save(); }
+    async saveSettings() { 
+        // Save settings to data.json
+        const data: PluginData | null = await this.loadData();
+        await this.saveData({ 
+            settings: this.settings, 
+            cardData: data?.cardData || {},
+            reviewHistory: data?.reviewHistory || []
+        });
+    }
     async activateView() { const { workspace } = this.app; let leaf = workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD)[0]; if (leaf) { workspace.revealLeaf(leaf); return; } leaf = workspace.getRightLeaf(false) || workspace.getLeaf(true); await leaf.setViewState({ type: VIEW_TYPE_DASHBOARD, active: true }); workspace.revealLeaf(leaf); }
     refreshDashboardView() { const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_DASHBOARD)[0]; if (leaf?.view instanceof DashboardView) { (leaf.view as DashboardView).render(); } }
 }
