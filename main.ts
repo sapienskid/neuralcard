@@ -163,6 +163,7 @@ class DataManager {
         return Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean);
     }
     getReviewQueue(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards.slice(0, this.plugin.settings.reviewsPerDay), ...newCards.slice(0, this.plugin.settings.newCardsPerDay)]; }
+    getAllCardsForStudy(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards, ...newCards]; }
     updateCard(card: Card, rating: Rating) { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const newFsrsData = scheduling_cards[rating as Exclude<Rating, Rating.Manual>].card; this.fsrsDataStore[card.id] = newFsrsData; card.fsrsData = newFsrsData; this.reviewHistory.push({ cardId: card.id, timestamp: now.getTime(), rating }); this.save(); }
     getNextReviewIntervals(card: Card): Record<Exclude<Rating, Rating.Manual>, string> { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const formatInterval = (days: number): string => { if (days < 1) return "<1d"; if (days < 30) return `${Math.round(days)}d`; if (days < 365) return `${(days / 30).toFixed(1)}m`; return `${(days / 365).toFixed(1)}y`; }; return { [Rating.Again]: formatInterval(scheduling_cards[Rating.Again].card.scheduled_days), [Rating.Hard]: formatInterval(scheduling_cards[Rating.Hard].card.scheduled_days), [Rating.Good]: formatInterval(scheduling_cards[Rating.Good].card.scheduled_days), [Rating.Easy]: formatInterval(scheduling_cards[Rating.Easy].card.scheduled_days), }; }
     getStats() { const now = new Date(); const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const reviewsToday = this.reviewHistory.filter(log => log.timestamp >= todayStart); const activity = new Array(30).fill(0); this.reviewHistory.forEach(log => { const daysAgo = Math.floor((now.getTime() - log.timestamp) / (1000 * 60 * 60 * 24)); if (daysAgo < 30) activity[29 - daysAgo]++; }); const forecast = new Array(7).fill(0); let mature = 0, learning = 0, young = 0, total = 0; for (const card of this.cards.values()) { const data = this.fsrsDataStore[card.id]; if (data) { total++; if (data.due <= now) { const daysForward = Math.floor((data.due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)); if (daysForward < 7 && daysForward >= 0) forecast[daysForward]++; } if (data.stability >= 21) mature++; else if (data.state === State.Review) young++; else learning++; } } return { reviewsToday: reviewsToday.length, activity, forecast, maturity: { mature, young, learning, new: this.cards.size - total } }; }
@@ -210,6 +211,19 @@ class DashboardView extends ItemView {
                         new Notice('No cards to review in this deck!');
                         return;
                     }
+                    new ReviewModal(this.app, this.plugin, queue).open();
+                });
+
+            new ButtonComponent(buttonContainer)
+                .setButtonText('Cram Mode')
+                .setTooltip('Study ALL cards (ignores daily limits) - perfect for exam prep')
+                .onClick(() => {
+                    const queue = this.plugin.dataManager.getAllCardsForStudy(deck.id);
+                    if (queue.length === 0) {
+                        new Notice('No cards in this deck!');
+                        return;
+                    }
+                    new Notice(`Cram Mode: Studying all ${queue.length} cards`);
                     new ReviewModal(this.app, this.plugin, queue).open();
                 });
 
@@ -562,13 +576,14 @@ class StatsModal extends Modal {
 
 // --- UI: CUSTOM STUDY MODAL ---
 class CustomStudyModal extends Modal {
-    private plugin: FSRSFlashcardsPlugin; private tags: string = ""; private state: "new" | "due" | "learning" = "due"; private limit: number = 50;
+    private plugin: FSRSFlashcardsPlugin; private tags: string = ""; private state: "new" | "due" | "learning" | "all" = "due"; private limit: number = 50; private unlimited: boolean = false;
     constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app); this.plugin = plugin; }
     onOpen() {
         this.contentEl.empty(); this.titleEl.setText("Custom Study Session");
         new Setting(this.contentEl).setName("Filter by Tags").setDesc("Comma-separated, e.g., #calculus, #chapter1").addText(text => text.setValue(this.tags).onChange(val => this.tags = val));
-        new Setting(this.contentEl).setName("Filter by Card State").addDropdown(dd => dd.addOption("due", "Due").addOption("new", "New").addOption("learning", "Learning").setValue(this.state).onChange(val => this.state = val as any));
-        new Setting(this.contentEl).setName("Card Limit").addText(text => text.setValue(this.limit.toString()).onChange(val => this.limit = parseInt(val) || 50));
+        new Setting(this.contentEl).setName("Filter by Card State").addDropdown(dd => dd.addOption("due", "Due").addOption("new", "New").addOption("learning", "Learning").addOption("all", "All Cards (Cram Mode)").setValue(this.state).onChange(val => this.state = val as any));
+        new Setting(this.contentEl).setName("Card Limit").setDesc("Set to 0 or enable unlimited for no limit").addText(text => text.setValue(this.limit.toString()).onChange(val => this.limit = parseInt(val) || 0));
+        new Setting(this.contentEl).setName("Unlimited Cards").setDesc("Ignore card limit - study all matching cards (for exam prep)").addToggle(toggle => toggle.setValue(this.unlimited).onChange(val => this.unlimited = val));
         new Setting(this.contentEl).addButton(btn => btn.setButtonText("Start Studying").setCta().onClick(() => this.startSession()));
     }
     startSession() {
@@ -576,17 +591,23 @@ class CustomStudyModal extends Modal {
         const allCards = this.plugin.dataManager.getAllCards();
         const requiredTags = this.tags.split(',').map(t => t.trim().toLowerCase()).filter(Boolean);
 
-        const queue = allCards.filter(card => {
+        let queue = allCards.filter(card => {
             const data = card.fsrsData;
-            const cardState = !data ? "new" : data.due <= now ? "due" : "learning";
-            if (this.state !== cardState) return false;
+            if (this.state !== "all") {
+                const cardState = !data ? "new" : data.due <= now ? "due" : "learning";
+                if (this.state !== cardState) return false;
+            }
             if (requiredTags.length > 0) {
                 const fileCache = this.app.metadataCache.getCache(card.filePath);
                 const fileTags = (fileCache?.tags?.map(t => t.tag.toLowerCase()) || []).concat(fileCache?.frontmatter?.tags?.map((t: string) => `#${t.toLowerCase()}`) || []);
                 return requiredTags.every(reqTag => fileTags.includes(reqTag));
             }
             return true;
-        }).slice(0, this.limit);
+        });
+        
+        if (!this.unlimited && this.limit > 0) {
+            queue = queue.slice(0, this.limit);
+        }
 
         if (queue.length === 0) { new Notice("No cards found matching your criteria."); return; }
         this.close();

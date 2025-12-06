@@ -3,9 +3,9 @@ import { existsSync } from 'fs';
 import { join } from 'path';
 
 // Define the vault path - change this to your vault's path
-const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH || '/path/to/your/obsidian/vault';
+const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH || '/home/sapiens/Second Brain/';
 
-const PLUGIN_DIR = join(VAULT_PATH, '.obsidian', 'plugins', 'neuralcard-flashcards');
+const PLUGIN_DIR = join(VAULT_PATH, '.obsidian', 'plugins', 'neuralcard');
 
 // Check if vault exists
 if (!existsSync(VAULT_PATH)) {
