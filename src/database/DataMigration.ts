@@ -48,7 +48,8 @@ export class DataMigration {
                 const mapping = deckMapping[cardId];
                 
                 if (!mapping) {
-                    console.warn(`No deck mapping found for card: ${cardId}`);
+                    // Debug log instead of warning for orphaned cards
+                    console.debug(`No deck mapping found for card: ${cardId} (orphaned)`);
                     skippedCards++;
                     continue;
                 }

@@ -84,6 +84,7 @@ class DataManager {
     private reviewHistory: ReviewLog[] = [];
     private pouchDB: PouchDBManager | null = null;
     private migrationCompleted: boolean = false;
+    private isLoaded: boolean = false;
 
     constructor(plugin: FSRSFlashcardsPlugin) { 
         this.plugin = plugin; 
@@ -204,6 +205,11 @@ class DataManager {
             await this.loadFromLegacyJSON();
         }
         await this.buildIndex();
+        this.isLoaded = true;
+    }
+
+    isDataLoaded() {
+        return this.isLoaded;
     }
 
     private async loadFromPouchDB() {
@@ -370,7 +376,29 @@ class DashboardView extends ItemView {
     private plugin: FSRSFlashcardsPlugin; constructor(leaf: WorkspaceLeaf, plugin: FSRSFlashcardsPlugin) { super(leaf); this.plugin = plugin; }
     getViewType(): string { return VIEW_TYPE_DASHBOARD; } getDisplayText(): string { return 'FSRS Decks'; } getIcon(): string { return ICON_NAME; }
     async onOpen() { this.render(); }
-    render() { this.contentEl.empty(); this.contentEl.style.padding = "var(--size-4-4)"; this.renderHeader(); this.renderDecks(); }
+    render() { 
+        this.contentEl.empty(); 
+        this.contentEl.style.padding = "var(--size-4-4)"; 
+        
+        if (!this.plugin.dataManager.isDataLoaded()) {
+            this.renderLoading();
+            return;
+        }
+        
+        this.renderHeader(); 
+        this.renderDecks(); 
+    }
+    
+    private renderLoading() {
+        const container = this.contentEl.createDiv({ cls: 'fsrs-empty-state' });
+        container.createEl('h2', { text: 'Loading Decks...' });
+        container.createEl('p', { text: 'Please wait while we scan your vault.' });
+        new ButtonComponent(container)
+            .setIcon('loader')
+            .setDisabled(true)
+            .buttonEl.addClass('loading-spinner');
+    }
+
     private renderHeader() {
         const headerEl = this.contentEl.createDiv(); const setting = new Setting(headerEl).setName("Flashcard Decks").setHeading();
         setting.addExtraButton(btn => btn.setIcon('bar-chart-3').setTooltip('View Statistics').onClick(() => new StatsModal(this.app, this.plugin).open()));
@@ -1102,10 +1130,15 @@ export default class FSRSFlashcardsPlugin extends Plugin {
         this.addStyle();
         await this.loadSettings();
         this.dataManager = new DataManager(this);
-        await this.dataManager.load();
         
-        // Initialize sync if enabled
-        await this.dataManager.initializeSync();
+        this.app.workspace.onLayoutReady(async () => {
+            await this.dataManager.load();
+            
+            // Initialize sync if enabled
+            await this.dataManager.initializeSync();
+            
+            this.refreshDashboardView();
+        });
         
         this.addSettingTab(new FSRSSettingsTab(this.app, this));
         this.registerView(VIEW_TYPE_DASHBOARD, (leaf) => new DashboardView(leaf, this));
