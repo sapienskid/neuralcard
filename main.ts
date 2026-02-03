@@ -249,7 +249,10 @@ class DataManager {
     updateFsrsParameters(params: FSRSParameters) { this.fsrs = new FSRS(params); }
     async buildIndex() {
         console.log("FSRS: Building index...");
-        this.decks.clear(); this.cards.clear();
+        this.decks.clear(); 
+        this.cards.clear();
+        // Note: We preserve fsrsDataStore to retain review history
+        // Stale entries will be cleaned up naturally since their cards no longer exist
         for (const file of this.plugin.app.vault.getMarkdownFiles()) { await this.updateFile(file); }
         this.recalculateAllDeckStats();
         console.log(`FSRS: Index complete. Found ${this.decks.size} decks and ${this.cards.size} cards.`);
@@ -281,7 +284,9 @@ class DataManager {
             let front = frontPart.trim();
 
             if (blockIdMatch) {
-                cardId = blockIdMatch[1];
+                // Namespace the cardId with deckId to prevent collisions across decks
+                // This ensures cards with same block ID in different files are unique
+                cardId = `${deckId}::${blockIdMatch[1]}`;
                 front = frontPart.replace(/\^([a-zA-Z0-9-]+)\s*$/m, '').trim();
             } else {
                 cardId = CryptoJS.SHA256(file.path + '::' + front).toString();
@@ -311,7 +316,8 @@ class DataManager {
 
                 let cardId: string;
                 if (blockIdMatch) {
-                    cardId = `${blockIdMatch[1]}-${clozeNum}`;
+                    // Namespace with deckId to prevent collisions across decks
+                    cardId = `${deckId}::${blockIdMatch[1]}-${clozeNum}`;
                 } else {
                     cardId = CryptoJS.SHA256(`${file.path}::${paragraph}::${clozeNum}`).toString();
                 }
@@ -327,23 +333,77 @@ class DataManager {
 
         if (newDeck.cardIds.size > 0) this.decks.set(deckId, newDeck);
     }
-    removeDeck(deckId: string, fullDelete: boolean = true) { const deck = this.decks.get(deckId); if (deck) { deck.cardIds.forEach(cardId => { this.cards.delete(cardId); if (fullDelete) delete this.fsrsDataStore[cardId]; }); this.decks.delete(deckId); if (fullDelete) this.save(); } }
+    removeDeck(deckId: string, fullDelete: boolean = true) { 
+        const deck = this.decks.get(deckId); 
+        if (deck) { 
+            deck.cardIds.forEach(cardId => { 
+                this.cards.delete(cardId); 
+                // Always delete from fsrsDataStore to prevent orphaned references
+                delete this.fsrsDataStore[cardId]; 
+            }); 
+            this.decks.delete(deckId); 
+            if (fullDelete) this.save(); 
+        } 
+    }
     async renameDeck(file: TFile, oldPath: string) {
         const oldDeckId = this.getDeckId(oldPath);
         this.removeDeck(oldDeckId, false);
         await this.updateFile(file);
         await this.save();
     }
-    recalculateAllDeckStats() { const now = new Date(); for (const deck of this.decks.values()) { deck.stats = { new: 0, due: 0, learning: 0 }; for (const cardId of deck.cardIds) { const fsrsData = this.fsrsDataStore[cardId]; if (!fsrsData || fsrsData.state === State.New) { deck.stats.new++; } else { if (fsrsData.state === State.Learning || fsrsData.state === State.Relearning) deck.stats.learning++; if (fsrsData.due <= now) deck.stats.due++; } } } }
+    recalculateAllDeckStats() { 
+        const now = new Date(); 
+        for (const deck of this.decks.values()) { 
+            deck.stats = { new: 0, due: 0, learning: 0 }; 
+            for (const cardId of deck.cardIds) { 
+                // Get the card to verify it exists and check its current deck
+                const card = this.cards.get(cardId);
+                if (!card || card.deckId !== deck.id) continue; // Skip if card doesn't exist or doesn't belong to this deck
+                
+                const fsrsData = this.fsrsDataStore[cardId]; 
+                if (!fsrsData || fsrsData.state === State.New) { 
+                    deck.stats.new++; 
+                } else { 
+                    if (fsrsData.state === State.Learning || fsrsData.state === State.Relearning) deck.stats.learning++; 
+                    if (fsrsData.due <= now) deck.stats.due++; 
+                } 
+            } 
+        } 
+    }
     getDecks(): Deck[] { return Array.from(this.decks.values()).sort((a, b) => a.title.localeCompare(b.title)); }
     getAllCards(): Card[] { return Array.from(this.cards.values()); }
     getCardsByDeck(deckId: string): Card[] {
         const deck = this.decks.get(deckId);
         if (!deck) return [];
-        return Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean);
+        return Array.from(deck.cardIds)
+            .map(id => this.cards.get(id))
+            .filter((card): card is Card => {
+                // Only include cards that exist and belong to this deck
+                return card !== undefined && card !== null && card.deckId === deckId;
+            });
     }
-    getReviewQueue(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards.slice(0, this.plugin.settings.reviewsPerDay), ...newCards.slice(0, this.plugin.settings.newCardsPerDay)]; }
-    getAllCardsForStudy(deckId: string): Card[] { const deck = this.decks.get(deckId); if (!deck) return []; const now = new Date(); const allCards = Array.from(deck.cardIds).map(id => this.cards.get(id)!).filter(Boolean); const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); return [...dueCards, ...newCards]; }
+    getReviewQueue(deckId: string): Card[] { 
+        const deck = this.decks.get(deckId); 
+        if (!deck) return []; 
+        const now = new Date(); 
+        const allCards = Array.from(deck.cardIds)
+            .map(id => this.cards.get(id))
+            .filter((card): card is Card => card !== undefined && card !== null && card.deckId === deckId);
+        const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); 
+        const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); 
+        return [...dueCards.slice(0, this.plugin.settings.reviewsPerDay), ...newCards.slice(0, this.plugin.settings.newCardsPerDay)]; 
+    }
+    getAllCardsForStudy(deckId: string): Card[] { 
+        const deck = this.decks.get(deckId); 
+        if (!deck) return []; 
+        const now = new Date(); 
+        const allCards = Array.from(deck.cardIds)
+            .map(id => this.cards.get(id))
+            .filter((card): card is Card => card !== undefined && card !== null && card.deckId === deckId);
+        const dueCards = allCards.filter(c => c.fsrsData && c.fsrsData.state !== State.New && c.fsrsData.due <= now).sort((a, b) => a.fsrsData!.due.getTime() - b.fsrsData!.due.getTime()); 
+        const newCards = allCards.filter(c => !c.fsrsData || c.fsrsData.state === State.New); 
+        return [...dueCards, ...newCards]; 
+    }
     updateCard(card: Card, rating: Rating) { 
         const now = new Date(); 
         const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; 
@@ -357,6 +417,7 @@ class DataManager {
         
         // Save immediately to PouchDB if enabled
         if (this.plugin.settings.usePouchDB && this.pouchDB) {
+            // Ensure we use the correct deckId from the card object
             this.pouchDB.saveCardState(card.id, card.deckId, card.filePath, newFsrsData).catch(err => 
                 console.error('Failed to save card state:', err)
             );
@@ -369,6 +430,40 @@ class DataManager {
     }
     getNextReviewIntervals(card: Card): Record<Exclude<Rating, Rating.Manual>, string> { const now = new Date(); const fsrsCard = card.fsrsData || { due: now, stability: 0, difficulty: 0, elapsed_days: 0, scheduled_days: 0, reps: 0, lapses: 0, state: State.New, learning_steps: 0 }; const scheduling_cards = this.fsrs.repeat(fsrsCard, now); const formatInterval = (days: number): string => { if (days < 1) return "<1d"; if (days < 30) return `${Math.round(days)}d`; if (days < 365) return `${(days / 30).toFixed(1)}m`; return `${(days / 365).toFixed(1)}y`; }; return { [Rating.Again]: formatInterval(scheduling_cards[Rating.Again].card.scheduled_days), [Rating.Hard]: formatInterval(scheduling_cards[Rating.Hard].card.scheduled_days), [Rating.Good]: formatInterval(scheduling_cards[Rating.Good].card.scheduled_days), [Rating.Easy]: formatInterval(scheduling_cards[Rating.Easy].card.scheduled_days), }; }
     getStats() { const now = new Date(); const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime(); const reviewsToday = this.reviewHistory.filter(log => log.timestamp >= todayStart); const activity = new Array(30).fill(0); this.reviewHistory.forEach(log => { const daysAgo = Math.floor((now.getTime() - log.timestamp) / (1000 * 60 * 60 * 24)); if (daysAgo < 30) activity[29 - daysAgo]++; }); const forecast = new Array(7).fill(0); let mature = 0, learning = 0, young = 0, total = 0; for (const card of this.cards.values()) { const data = this.fsrsDataStore[card.id]; if (data) { total++; if (data.due <= now) { const daysForward = Math.floor((data.due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)); if (daysForward < 7 && daysForward >= 0) forecast[daysForward]++; } if (data.stability >= 21) mature++; else if (data.state === State.Review) young++; else learning++; } } return { reviewsToday: reviewsToday.length, activity, forecast, maturity: { mature, young, learning, new: this.cards.size - total } }; }
+    
+    async resetAllProgress(): Promise<void> {
+        console.log('Nuclear option: Resetting all card progress...');
+        
+        // Clear from memory
+        this.fsrsDataStore = {};
+        this.reviewHistory = [];
+        
+        // Clear from cards in memory
+        for (const card of this.cards.values()) {
+            card.fsrsData = undefined;
+        }
+        
+        // Clear from PouchDB if enabled
+        if (this.plugin.settings.usePouchDB && this.pouchDB) {
+            console.log('Clearing PouchDB card states and review logs...');
+            await this.pouchDB.destroy();
+            // Recreate the database
+            const { PouchDBManager } = await import('./src/database/PouchDBManager');
+            this.pouchDB = new PouchDBManager('neuralcard_local');
+            // Re-initialize sync if it was enabled
+            if (this.plugin.settings.syncEnabled) {
+                await this.initializeSync();
+            }
+        }
+        
+        // Clear from legacy JSON storage
+        await this.save();
+        
+        // Recalculate stats to show all cards as "New"
+        this.recalculateAllDeckStats();
+        
+        console.log('All progress has been reset');
+    }
 }
 
 // --- UI: DASHBOARD VIEW ---
@@ -453,58 +548,140 @@ class DashboardView extends ItemView {
     private renderDecks() {
         const decks = this.plugin.dataManager.getDecks();
         if (decks.length === 0) { this.renderEmptyState(); return; }
-        decks.forEach(deck => {
-            const total = deck.cardIds.size;
-            const setting = new Setting(this.contentEl)
-                .setName(deck.title)
-                .setDesc(`Due: ${deck.stats.due} • New: ${deck.stats.new} • Total: ${total}`);
+        
+        // Group decks by folder
+        const groupedDecks = this.groupDecksByFolder(decks);
+        
+        // Render each folder group
+        for (const [folderPath, folderDecks] of groupedDecks) {
+            this.renderFolderGroup(folderPath, folderDecks);
+        }
+    }
+    
+    private groupDecksByFolder(decks: Deck[]): Map<string, Deck[]> {
+        const groups = new Map<string, Deck[]>();
+        
+        for (const deck of decks) {
+            // Get the folder path (directory containing the deck file)
+            const lastSlashIndex = deck.filePath.lastIndexOf('/');
+            const folderPath = lastSlashIndex > 0 ? deck.filePath.substring(0, lastSlashIndex) : 'Root';
+            
+            if (!groups.has(folderPath)) {
+                groups.set(folderPath, []);
+            }
+            groups.get(folderPath)!.push(deck);
+        }
+        
+        // Sort folders alphabetically
+        return new Map([...groups.entries()].sort((a, b) => a[0].localeCompare(b[0])));
+    }
+    
+    private renderFolderGroup(folderPath: string, decks: Deck[]) {
+        // Create folder header
+        const folderContainer = this.contentEl.createDiv({ cls: 'fsrs-folder-group' });
+        folderContainer.style.marginBottom = 'var(--size-4-3)';
+        
+        // Folder header with toggle
+        const folderHeader = folderContainer.createDiv({ cls: 'fsrs-folder-header' });
+        folderHeader.style.display = 'flex';
+        folderHeader.style.alignItems = 'center';
+        folderHeader.style.padding = 'var(--size-4-2) var(--size-4-3)';
+        folderHeader.style.backgroundColor = 'var(--background-secondary)';
+        folderHeader.style.borderRadius = 'var(--radius-s)';
+        folderHeader.style.cursor = 'pointer';
+        folderHeader.style.marginBottom = 'var(--size-4-2)';
+        
+        // Folder icon
+        const folderIcon = folderHeader.createSpan();
+        folderIcon.style.marginRight = 'var(--size-4-2)';
+        setIcon(folderIcon, 'folder');
+        
+        // Folder name (last part of path or "Root")
+        const folderName = folderPath === 'Root' ? 'Root' : folderPath.substring(folderPath.lastIndexOf('/') + 1);
+        const folderLabel = folderHeader.createEl('span', { text: folderName, cls: 'fsrs-folder-name' });
+        folderLabel.style.fontWeight = '600';
+        folderLabel.style.flex = '1';
+        
+        // Deck count badge
+        const deckCount = folderHeader.createEl('span', { text: `${decks.length} deck${decks.length !== 1 ? 's' : ''}`, cls: 'fsrs-folder-count' });
+        deckCount.style.fontSize = 'var(--font-smaller)';
+        deckCount.style.color = 'var(--text-muted)';
+        deckCount.style.marginLeft = 'var(--size-4-2)';
+        
+        // Container for decks (collapsible)
+        const decksContainer = folderContainer.createDiv({ cls: 'fsrs-folder-decks' });
+        decksContainer.style.paddingLeft = 'var(--size-4-3)';
+        
+        // Toggle collapse/expand
+        let isCollapsed = false;
+        folderHeader.addEventListener('click', () => {
+            isCollapsed = !isCollapsed;
+            decksContainer.style.display = isCollapsed ? 'none' : 'block';
+            setIcon(folderIcon, isCollapsed ? 'folder-closed' : 'folder');
+        });
+        
+        // Render decks in this folder
+        for (const deck of decks) {
+            this.renderDeckItem(decksContainer, deck);
+        }
+    }
+    
+    private renderDeckItem(container: HTMLElement, deck: Deck) {
+        const total = deck.cardIds.size;
+        const setting = new Setting(container)
+            .setName(deck.title)
+            .setDesc(`Due: ${deck.stats.due} • New: ${deck.stats.new} • Total: ${total}`);
+        
+        // Indent deck items
+        setting.settingEl.style.marginLeft = 'var(--size-4-2)';
+        setting.settingEl.style.borderLeft = '2px solid var(--background-modifier-border)';
+        setting.settingEl.style.paddingLeft = 'var(--size-4-3)';
 
-            setting.nameEl.style.cursor = "pointer";
-            setting.nameEl.addEventListener('click', () => {
-                this.app.workspace.openLinkText(deck.filePath, deck.filePath);
+        setting.nameEl.style.cursor = "pointer";
+        setting.nameEl.addEventListener('click', () => {
+            this.app.workspace.openLinkText(deck.filePath, deck.filePath);
+        });
+
+        const buttonContainer = setting.controlEl.createDiv();
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.flexDirection = 'column';
+        buttonContainer.style.gap = 'var(--size-4-1)';
+
+        new ButtonComponent(buttonContainer)
+            .setButtonText('Study Now')
+            .setCta()
+            .onClick(() => {
+                const queue = this.plugin.dataManager.getReviewQueue(deck.id);
+                if (queue.length === 0) {
+                    new Notice('No cards to review in this deck!');
+                    return;
+                }
+                new ReviewModal(this.app, this.plugin, queue).open();
             });
 
-            const buttonContainer = setting.controlEl.createDiv();
-            buttonContainer.style.display = 'flex';
-            buttonContainer.style.flexDirection = 'column';
-            buttonContainer.style.gap = 'var(--size-4-1)';
+        new ButtonComponent(buttonContainer)
+            .setButtonText('Cram Mode')
+            .setTooltip('Study ALL cards (ignores daily limits) - perfect for exam prep')
+            .onClick(() => {
+                const queue = this.plugin.dataManager.getAllCardsForStudy(deck.id);
+                if (queue.length === 0) {
+                    new Notice('No cards in this deck!');
+                    return;
+                }
+                new Notice(`Cram Mode: Studying all ${queue.length} cards`);
+                new ReviewModal(this.app, this.plugin, queue).open();
+            });
 
-            new ButtonComponent(buttonContainer)
-                .setButtonText('Study Now')
-                .setCta()
-                .onClick(() => {
-                    const queue = this.plugin.dataManager.getReviewQueue(deck.id);
-                    if (queue.length === 0) {
-                        new Notice('No cards to review in this deck!');
-                        return;
-                    }
-                    new ReviewModal(this.app, this.plugin, queue).open();
-                });
-
-            new ButtonComponent(buttonContainer)
-                .setButtonText('Cram Mode')
-                .setTooltip('Study ALL cards (ignores daily limits) - perfect for exam prep')
-                .onClick(() => {
-                    const queue = this.plugin.dataManager.getAllCardsForStudy(deck.id);
-                    if (queue.length === 0) {
-                        new Notice('No cards in this deck!');
-                        return;
-                    }
-                    new Notice(`Cram Mode: Studying all ${queue.length} cards`);
-                    new ReviewModal(this.app, this.plugin, queue).open();
-                });
-
-            new ButtonComponent(buttonContainer)
-                .setButtonText('Browse')
-                .onClick(() => {
-                    const cards = this.plugin.dataManager.getCardsByDeck(deck.id);
-                    if (cards.length === 0) {
-                        new Notice('This deck has no cards to browse.');
-                        return;
-                    }
-                    new BrowseModal(this.app, this.plugin, cards).open();
-                });
-        });
+        new ButtonComponent(buttonContainer)
+            .setButtonText('Browse')
+            .onClick(() => {
+                const cards = this.plugin.dataManager.getCardsByDeck(deck.id);
+                if (cards.length === 0) {
+                    new Notice('This deck has no cards to browse.');
+                    return;
+                }
+                new BrowseModal(this.app, this.plugin, cards).open();
+            });
     }
     private renderEmptyState() { const emptyStateEl = this.contentEl.createDiv({ cls: 'fsrs-empty-state' }); emptyStateEl.createEl('h2', { text: 'No Decks Found' }); emptyStateEl.createEl('p', { text: `Create a new note and add the tag #${this.plugin.settings.deckTag} to get started.` }); }
 }
@@ -882,6 +1059,98 @@ class CustomStudyModal extends Modal {
     }
 }
 
+// --- UI: RESET PROGRESS MODAL (Nuclear Option) ---
+class ResetProgressModal extends Modal {
+    private plugin: FSRSFlashcardsPlugin;
+    private confirmText: string = "";
+    
+    constructor(app: App, plugin: FSRSFlashcardsPlugin) { 
+        super(app); 
+        this.plugin = plugin; 
+    }
+    
+    onOpen() {
+        this.contentEl.empty();
+        this.titleEl.setText("🚨 Reset All Card Progress");
+        
+        // Warning message
+        const warningContainer = this.contentEl.createDiv({ cls: 'fsrs-reset-warning' });
+        warningContainer.style.backgroundColor = 'var(--background-modifier-error)';
+        warningContainer.style.padding = 'var(--size-4-4)';
+        warningContainer.style.borderRadius = 'var(--radius-m)';
+        warningContainer.style.marginBottom = 'var(--size-4-4)';
+        
+        warningContainer.createEl('h3', { 
+            text: '⚠️ WARNING: This action cannot be undone!',
+            attr: { style: 'color: var(--text-error); margin-top: 0;' }
+        });
+        
+        warningContainer.createEl('p', { 
+            text: 'This will permanently delete ALL your review history and card progress:' 
+        });
+        
+        const consequences = warningContainer.createEl('ul');
+        consequences.createEl('li', { text: 'All cards will be reset to "New" status' });
+        consequences.createEl('li', { text: 'All review history will be deleted' });
+        consequences.createEl('li', { text: 'All FSRS scheduling data will be cleared' });
+        consequences.createEl('li', { text: 'You will start from scratch with every card' });
+        
+        // Stats display
+        const statsContainer = this.contentEl.createDiv({ cls: 'fsrs-reset-stats' });
+        statsContainer.style.marginBottom = 'var(--size-4-4)';
+        
+        const allCards = this.plugin.dataManager.getAllCards();
+        const cardsWithProgress = allCards.filter(c => c.fsrsData && c.fsrsData.state !== 0).length;
+        
+        statsContainer.createEl('h4', { text: 'Current Data:' });
+        const statsList = statsContainer.createEl('ul');
+        statsList.createEl('li', { text: `Total cards: ${allCards.length}` });
+        statsList.createEl('li', { text: `Cards with progress: ${cardsWithProgress}` });
+        
+        // Confirmation input
+        new Setting(this.contentEl)
+            .setName('Type "DELETE" to confirm')
+            .setDesc('This confirmation prevents accidental data loss')
+            .addText(text => text
+                .setPlaceholder('DELETE')
+                .onChange(val => this.confirmText = val));
+        
+        // Buttons
+        new Setting(this.contentEl)
+            .addButton(btn => btn
+                .setButtonText('Cancel')
+                .onClick(() => this.close()))
+            .addButton(btn => btn
+                .setButtonText('💥 DELETE ALL PROGRESS')
+                .setWarning()
+                .onClick(async () => {
+                    if (this.confirmText !== 'DELETE') {
+                        new Notice('Type "DELETE" to confirm', 3000);
+                        return;
+                    }
+                    await this.resetAllProgress();
+                }));
+    }
+    
+    private async resetAllProgress() {
+        try {
+            new Notice('Deleting all card progress...', 0);
+            
+            // Clear from DataManager
+            await this.plugin.dataManager.resetAllProgress();
+            
+            // Refresh the dashboard
+            this.plugin.refreshDashboardView();
+            
+            this.close();
+            new Notice('✅ All card progress has been reset! All cards are now "New".', 5000);
+        } catch (error) {
+            console.error('Failed to reset progress:', error);
+            new Notice(`❌ Failed to reset: ${error.message}`, 5000);
+        }
+    }
+}
+
 // --- UI: SETTINGS TAB ---
 class FSRSSettingsTab extends PluginSettingTab {
     plugin: FSRSFlashcardsPlugin; constructor(app: App, plugin: FSRSFlashcardsPlugin) { super(app, plugin); this.plugin = plugin; }
@@ -1180,6 +1449,15 @@ export default class FSRSFlashcardsPlugin extends Plugin {
             });
         }
         
+        // Nuclear option: Reset all card progress
+        this.addCommand({
+            id: 'reset-all-card-progress',
+            name: '🚨 Reset All Card Progress (Nuclear Option)',
+            callback: async () => {
+                new ResetProgressModal(this.app, this).open();
+            }
+        });
+        
         const debouncedRefresh = debounce(() => { this.dataManager.recalculateAllDeckStats(); this.refreshDashboardView(); }, 500, true);
         const updateAndRefresh = async (file: TFile) => { await this.dataManager.updateFile(file); debouncedRefresh(); };
         this.registerEvent(this.app.vault.on('create', (file) => file instanceof TFile && updateAndRefresh(file)));
@@ -1223,6 +1501,53 @@ export default class FSRSFlashcardsPlugin extends Plugin {
                 padding: var(--size-4-4);
                 margin: var(--size-4-4) auto;
                 max-width: 600px;
+            }
+            /* Folder Group Styling */
+            .fsrs-folder-group {
+                margin-bottom: var(--size-4-3);
+            }
+            .fsrs-folder-header {
+                display: flex;
+                align-items: center;
+                padding: var(--size-4-2) var(--size-4-3);
+                background-color: var(--background-secondary);
+                border-radius: var(--radius-s);
+                cursor: pointer;
+                margin-bottom: var(--size-4-2);
+                transition: background-color 0.2s ease;
+            }
+            .fsrs-folder-header:hover {
+                background-color: var(--background-modifier-hover);
+            }
+            .fsrs-folder-header svg {
+                width: 16px;
+                height: 16px;
+                margin-right: var(--size-4-2);
+                color: var(--text-accent);
+            }
+            .fsrs-folder-name {
+                font-weight: 600;
+                flex: 1;
+                color: var(--text-normal);
+            }
+            .fsrs-folder-count {
+                font-size: var(--font-smaller);
+                color: var(--text-muted);
+                margin-left: var(--size-4-2);
+                background-color: var(--background-primary);
+                padding: 2px 8px;
+                border-radius: var(--radius-s);
+            }
+            .fsrs-folder-decks {
+                padding-left: var(--size-4-3);
+            }
+            .fsrs-folder-decks .setting-item {
+                margin-left: var(--size-4-2);
+                border-left: 2px solid var(--background-modifier-border);
+                padding-left: var(--size-4-3);
+            }
+            .fsrs-folder-decks .setting-item:last-child {
+                margin-bottom: 0;
             }
         `;
         const styleEl = document.createElement('style');
